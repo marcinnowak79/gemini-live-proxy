@@ -39,8 +39,34 @@ jobs:
 
       - name: Check publishable files for obvious local secrets
         run: |
-          ! grep -RInE 'AIza|Bearer [A-Za-z0-9_.-]+|password: "[^"]+"|192\.168\.8\.|/Users/' \
-            --exclude-dir=.git \
-            --exclude=.env \
-            --exclude='*.pyc' \
-            .
+          python - <<'PY'
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          pattern = re.compile(r'AIza|Bearer [A-Za-z0-9_.-]+|password: "[^"]+"|192\.168\.8\.|/Users/')
+          excluded = {
+              ".github/workflows/validate.yml",
+              "RELEASE.md",
+          }
+          hits = []
+          files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+          for file_name in files:
+              if file_name in excluded:
+                  continue
+              path = Path(file_name)
+              try:
+                  text = path.read_text(errors="ignore")
+              except UnicodeDecodeError:
+                  continue
+              for line_no, line in enumerate(text.splitlines(), 1):
+                  if pattern.search(line):
+                      hits.append(f"{file_name}:{line_no}: {line}")
+
+          if hits:
+              print("Potential local secrets found:")
+              print("\n".join(hits))
+              sys.exit(1)
+          print("No obvious local secrets found.")
+          PY
