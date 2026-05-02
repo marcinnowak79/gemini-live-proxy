@@ -213,13 +213,16 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             total_bytes = 0
             stop_streaming = False
             keep_reading_esp32 = True
-            audio_in_queue: asyncio.Queue[tuple[int, bytes] | None] = asyncio.Queue(maxsize=128)
+            audio_in_queue: asyncio.Queue[tuple[int, bytes] | None] = asyncio.Queue(maxsize=512)
             reader_task: asyncio.Task | None = None
+            dropped_audio_messages = 0
 
             async def enqueue_audio_message(mt: int, payload: bytes):
+                nonlocal dropped_audio_messages
                 if audio_in_queue.full():
                     try:
                         audio_in_queue.get_nowait()
+                        dropped_audio_messages += 1
                     except asyncio.QueueEmpty:
                         pass
                 await audio_in_queue.put((mt, payload))
@@ -241,9 +244,11 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                     except asyncio.QueueFull:
                         pass
 
+            reader_task = asyncio.create_task(esp32_audio_reader())
+
             async def realtime_audio_stream():
                 """Yield converted audio chunks as they arrive from ESP32."""
-                nonlocal chunk_count, total_bytes, stop_streaming, reader_task
+                nonlocal chunk_count, total_bytes, stop_streaming
                 stream_started = time.monotonic()
                 last_voice = stream_started
                 speech_started = False
@@ -251,7 +256,6 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 rms_max = 0.0
                 noise_floor = MIC_RMS_INITIAL_NOISE
                 speech_threshold = MIC_RMS_MIN_SPEECH
-                reader_task = asyncio.create_task(esp32_audio_reader())
 
                 # Keep streaming until Gemini responds (stop_streaming set by receive task)
                 try:
@@ -316,7 +320,8 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                     stop_streaming = True
                     print(
                         f"  [stream] Sent {chunk_count} chunks, {total_bytes}B mono16, "
-                        f"peak={peak_max}, rms={rms_max:.0f}, noise={noise_floor:.0f}, threshold={speech_threshold:.0f}",
+                        f"peak={peak_max}, rms={rms_max:.0f}, noise={noise_floor:.0f}, "
+                        f"threshold={speech_threshold:.0f}, dropped={dropped_audio_messages}",
                         flush=True,
                     )
 
