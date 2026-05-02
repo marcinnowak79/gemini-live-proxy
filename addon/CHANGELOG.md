@@ -2,6 +2,10 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.0.11
+
+- Refresh Home Assistant time/date context for every voice session instead of reusing the timestamp from add-on startup.
+
 ## 1.0.10
 
 - Detect the Voice PE device area from Home Assistant device registry and mark same-area entities as `local=true`.

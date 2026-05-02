@@ -129,7 +129,7 @@ async def handle_function_call(name: str, args: dict, room_lights: dict,
 # ESP32 WebSocket Handler
 # ============================================================
 
-async def handle_esp32_connection(websocket, entity_list, room_lights, ha_context, local_area_id):
+async def handle_esp32_connection(websocket, entity_list, room_lights, local_area_id):
     """Handle one ESP32 client connection."""
     print(f"[proxy] ESP32 connected: {websocket.remote_address}")
 
@@ -203,11 +203,17 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, ha_contex
                 nonlocal stop_streaming
                 stop_streaming = True  # Stop sending mic audio to Gemini
 
+            current_ha_context = await get_ha_context()
+            if current_ha_context:
+                print(f"  [context] {current_ha_context.strip()}", flush=True)
+            else:
+                print("  [context] Home Assistant time context unavailable", flush=True)
+
             session = GeminiSession(
                 client=client,
                 entity_list=entity_list,
                 room_lights=room_lights,
-                ha_context=ha_context,
+                ha_context=current_ha_context,
                 history=get_history(),
                 on_function_call=lambda n, a: handle_function_call(n, a, room_lights, send_audio_to_esp32),
                 voice=VOICE,
@@ -382,9 +388,9 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, ha_contex
         print(f"[proxy] ESP32 disconnected")
 
 
-async def run_proxy_server(entity_list, room_lights, ha_context, local_area_id):
+async def run_proxy_server(entity_list, room_lights, local_area_id):
     """Run WebSocket server for ESP32 connections."""
-    handler = lambda ws: handle_esp32_connection(ws, entity_list, room_lights, ha_context, local_area_id)
+    handler = lambda ws: handle_esp32_connection(ws, entity_list, room_lights, local_area_id)
 
     async with websockets.serve(handler, "0.0.0.0", PROXY_PORT):
         print(f"[proxy] Listening on ws://0.0.0.0:{PROXY_PORT}")
@@ -457,16 +463,14 @@ async def main():
     # Load entities from HA
     print("\n📡 Loading entities from HA...")
     entity_list, room_lights, local_area_id = await get_exposed_entities()
-    ha_context = await get_ha_context()
     print(f"  Entities: {len(entity_list.splitlines())}")
     print(f"  Rooms: {list(room_lights.keys())}")
     print(f"  Local area: {local_area_id or 'none'}")
-    print(f"  Context: {ha_context.strip()}")
 
     # Start HTTP audio server
     await run_audio_http_server()
 
-    await run_proxy_server(entity_list, room_lights, ha_context, local_area_id)
+    await run_proxy_server(entity_list, room_lights, local_area_id)
 
 
 if __name__ == "__main__":
