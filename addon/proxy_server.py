@@ -93,6 +93,12 @@ async def handle_function_call(name: str, args: dict, room_lights: dict,
             label=args.get("label", ""),
             cancel_all=bool(args.get("cancel_all", False)),
         )
+    if name == "stop_timer_alarm":
+        return await timer_manager.stop_alarm(
+            timer_id=args.get("timer_id", ""),
+            label=args.get("label", ""),
+            stop_all=bool(args.get("stop_all", False)),
+        )
 
     return await execute_function(name, args, room_lights)
 

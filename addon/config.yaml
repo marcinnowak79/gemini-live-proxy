@@ -33,6 +33,7 @@ options:
     - When the user asks for room lights, use control_room.
     - When the user asks for a specific device, use control_device.
     - Timers: for countdown requests, call set_timer. Use list_timers to answer timer status questions. Use cancel_timer to cancel timers.
+    - When a timer alarm is ringing and the user says "stop", "enough", "wystarczy", "stop timer", or similar, call stop_timer_alarm.
     - For requests like "play music after X minutes", call set_timer with action=play_media.
     - For requests like "run a scene/script after X minutes", call set_timer with action=run_script when a script is available.
     - Climate: for heating, cooling, AC or temperature changes, call set_climate.
@@ -52,6 +53,7 @@ options:
   timer_default_media_url: ""
   timer_default_media_content_type: "music"
   timer_default_script_id: ""
+  timer_alarm_repeat_interval_seconds: 3
 schema:
   gemini_api_key: str
   gemini_model: str?
@@ -66,6 +68,7 @@ schema:
   timer_default_media_url: str?
   timer_default_media_content_type: str?
   timer_default_script_id: str?
+  timer_alarm_repeat_interval_seconds: float?
 startup: application
 boot: auto
 init: false

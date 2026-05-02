@@ -7,6 +7,7 @@ All notable changes to this add-on are documented here.
 - Added persistent multi-timer support with voice-listable and voice-cancellable timers.
 - Added delayed timer actions for Home Assistant `media_player.play_media` and `script.turn_on`.
 - Play the configured default media on normal timer completion, not only for explicit media timers.
+- Keep normal timer alarms ringing until stopped with `stop_timer_alarm`, `cancel_timer`, or `cancel_all`.
 
 ## 1.0.11
 

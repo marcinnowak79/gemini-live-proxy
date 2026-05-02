@@ -128,6 +128,8 @@ http://homeassistant.local:8123/local/timer_music.mp3
 
 `timer_default_media_content_type` is passed to `media_player.play_media`. The default is `music`.
 
+`timer_alarm_repeat_interval_seconds` controls how often the default timer alarm media is replayed while a finished timer is ringing. The default is `3`.
+
 `timer_default_script_id` is the default Home Assistant script called for timer requests that should run a script after the delay.
 
 Example:
@@ -143,6 +145,7 @@ Voice commands supported by the timer tool include:
 - asking how much time is left
 - cancelling a named timer
 - cancelling all timers
+- stopping a ringing timer alarm
 - playing configured media after a timer
 - running a configured script after a timer
 

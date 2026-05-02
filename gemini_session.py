@@ -28,6 +28,7 @@ Rules:
 - When the user asks for room lights, use control_room.
 - When the user asks for a specific device, use control_device.
 - Timers: for countdown requests, call set_timer. Use list_timers to answer timer status questions. Use cancel_timer to cancel timers.
+- When a timer alarm is ringing and the user says "stop", "enough", "wystarczy", "stop timer", or similar, call stop_timer_alarm.
 - For requests like "play music after X minutes", call set_timer with action=play_media.
 - For requests like "run a scene/script after X minutes", call set_timer with action=run_script when a script is available.
 - Climate: for heating, cooling, AC or temperature changes, call set_climate.
@@ -106,6 +107,15 @@ def build_tools(room_keys: list[str], vacuum_enabled: bool = False) -> list:
                 "timer_id": {"type": "string"},
                 "label": {"type": "string"},
                 "cancel_all": {"type": "boolean"},
+            }},
+        ),
+        types.FunctionDeclaration(
+            name="stop_timer_alarm",
+            description="Stop ringing timer alarm audio. Use when the user says enough, stop, wystarczy, stop timer, or asks to silence a finished timer.",
+            parameters={"type": "object", "properties": {
+                "timer_id": {"type": "string"},
+                "label": {"type": "string"},
+                "stop_all": {"type": "boolean"},
             }},
         ),
         types.FunctionDeclaration(
