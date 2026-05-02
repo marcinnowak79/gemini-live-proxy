@@ -184,11 +184,19 @@ class TimerManager:
                 },
             })
 
-        return await call_ha_service("persistent_notification", "create", {
+        notification = await call_ha_service("persistent_notification", "create", {
             "title": "Gemini timer finished",
             "message": f"Timer '{label}' finished.",
             "notification_id": f"gemini_timer_{timer_id}",
         })
+        if DEFAULT_MEDIA_PLAYER and DEFAULT_MEDIA_URL:
+            media = await call_ha_service("media_player", "play_media", {
+                "entity_id": DEFAULT_MEDIA_PLAYER,
+                "media_content_id": DEFAULT_MEDIA_URL,
+                "media_content_type": DEFAULT_MEDIA_CONTENT_TYPE,
+            })
+            return {"status": media.get("status", notification.get("status")), "notification": notification, "media": media}
+        return notification
 
     async def _load(self) -> None:
         if not self.store_path.exists():
