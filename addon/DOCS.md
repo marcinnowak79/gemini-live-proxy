@@ -106,6 +106,46 @@ When `true`, Gemini receives only entities exposed to Home Assistant Assist/Conv
 
 This is the recommended default because it reduces prompt size and avoids exposing private or technical entities. Set it to `false` only if you deliberately want Gemini to see every supported entity from the Home Assistant entity registry.
 
+### Timer options
+
+The add-on supports multiple delayed timers. Timers are persisted in the add-on data directory and are restored after an add-on restart.
+
+`timer_media_player_entity_id` is the default Home Assistant media player used by timer actions that play audio.
+
+Example:
+
+```text
+media_player.home_assistant_voice_0a32f9_media_player
+```
+
+`timer_default_media_url` is the default URL played when the user asks for music/media after a timer without naming a specific URL.
+
+Example:
+
+```text
+http://homeassistant.local:8123/local/timer_music.mp3
+```
+
+`timer_default_media_content_type` is passed to `media_player.play_media`. The default is `music`.
+
+`timer_default_script_id` is the default Home Assistant script called for timer requests that should run a script after the delay.
+
+Example:
+
+```text
+script.timer_play_music
+```
+
+Voice commands supported by the timer tool include:
+
+- setting multiple timers
+- asking what timers are active
+- asking how much time is left
+- cancelling a named timer
+- cancelling all timers
+- playing configured media after a timer
+- running a configured script after a timer
+
 ## ESPHome Configuration
 
 Set the proxy URL in your ESPHome `secrets.yaml`:

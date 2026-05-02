@@ -25,6 +25,7 @@ from google import genai
 from protocol import *
 from ha_client import get_exposed_entities, get_ha_context, execute_function, is_vacuum_enabled
 from gemini_session import GeminiSession
+from timer_manager import TimerManager
 
 load_dotenv()
 
@@ -58,8 +59,7 @@ def add_to_history(role: str, text: str):
         conversation_history["entries"] = conversation_history["entries"][-20:]
 
 
-# Timer management
-active_timers = {}
+timer_manager = TimerManager()
 
 # Streaming audio state keyed by one response session.
 _audio_sessions: dict[str, tuple[asyncio.Queue, asyncio.Event]] = {}
@@ -76,55 +76,27 @@ def make_streaming_wav_header(sample_rate=24000, bits_per_sample=16, channels=1)
     return header
 
 
-async def handle_timer(seconds: float, label: str, send_audio_cb):
-    """Background timer task."""
-    print(f"  [timer] START: {seconds}s, label='{label}'")
-    await asyncio.sleep(seconds)
-    print(f"  [timer] DONE: {label}")
-    active_timers.pop(label, None)
-
-    # Generate TTS notification and send to client
-    client = genai.Client(api_key=API_KEY)
-    from google.genai import types
-    config = types.LiveConnectConfig(
-        response_modalities=[types.Modality.AUDIO],
-        speech_config=types.SpeechConfig(
-            voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE),
-            ),
-            language_code="pl-PL",
-        ),
-        system_instruction=types.Content(
-            parts=[types.Part(text="Przeczytaj tekst na głos po polsku.")]
-        ),
-    )
-    try:
-        async with client.aio.live.connect(
-            model=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-live-preview"),
-            config=config,
-        ) as session:
-            await session.send_realtime_input(text=f"Timer {label} skończył się!")
-            async for msg in session.receive():
-                sc = msg.server_content
-                if sc and sc.model_turn:
-                    for part in sc.model_turn.parts:
-                        if part.inline_data:
-                            await send_audio_cb(part.inline_data.data)
-                if sc and sc.turn_complete:
-                    break
-    except Exception as err:
-        print(f"  [timer] TTS error: {err}")
-
-
 async def handle_function_call(name: str, args: dict, room_lights: dict,
                                 send_audio_cb) -> dict:
     """Handle function calls — HA actions + timers."""
     if name == "set_timer":
-        seconds = float(args["seconds"])
-        label = args.get("label", f"{seconds}s")
-        task = asyncio.create_task(handle_timer(seconds, label, send_audio_cb))
-        active_timers[label] = task
-        return {"status": "ok", "message": f"Timer {label} set for {seconds}s"}
+        return await timer_manager.set_timer(
+            seconds=float(args["seconds"]),
+            label=args.get("label", ""),
+            action=args.get("action", "notify"),
+            media_player_entity_id=args.get("media_player_entity_id", ""),
+            media_url=args.get("media_url", ""),
+            media_content_type=args.get("media_content_type", ""),
+            script_id=args.get("script_id", ""),
+        )
+    if name == "list_timers":
+        return await timer_manager.list_timers()
+    if name == "cancel_timer":
+        return await timer_manager.cancel_timer(
+            timer_id=args.get("timer_id", ""),
+            label=args.get("label", ""),
+            cancel_all=bool(args.get("cancel_all", False)),
+        )
 
     return await execute_function(name, args, room_lights)
 
@@ -563,6 +535,7 @@ async def main():
     print(f"  Entities: {len(entity_list.splitlines())}")
     print(f"  Rooms: {list(room_lights.keys())}")
     print(f"  Local area: {local_area_id or 'none'}")
+    await timer_manager.start()
 
     # Start HTTP audio server
     await run_audio_http_server()

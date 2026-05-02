@@ -32,6 +32,9 @@ WebSocket bridge between an ESPHome firmware running on Home Assistant Voice PE 
    - `room_aliases_json`: JSON object mapping entity ID prefixes to room names
    - `vacuum_entity_id`: Home Assistant vacuum entity; enables the vacuum tool when set
    - `ha_exposed_only`: when true, only entities exposed to Assist are sent to Gemini
+   - `timer_media_player_entity_id`: default media player for timer media actions
+   - `timer_default_media_url`: default URL played for "play music after timer" commands
+   - `timer_default_script_id`: default script for delayed script timer actions
 
 Example `room_aliases_json`:
 

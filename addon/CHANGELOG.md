@@ -2,6 +2,11 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.0.12
+
+- Added persistent multi-timer support with voice-listable and voice-cancellable timers.
+- Added delayed timer actions for Home Assistant `media_player.play_media` and `script.turn_on`.
+
 ## 1.0.11
 
 - Refresh Home Assistant time/date context for every voice session instead of reusing the timestamp from add-on startup.

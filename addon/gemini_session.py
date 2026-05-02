@@ -27,7 +27,9 @@ Rules:
 - Only choose non-local devices when the user explicitly refers to their room, person, or unique device name.
 - When the user asks for room lights, use control_room.
 - When the user asks for a specific device, use control_device.
-- Timers: for countdown requests, call set_timer.
+- Timers: for countdown requests, call set_timer. Use list_timers to answer timer status questions. Use cancel_timer to cancel timers.
+- For requests like "play music after X minutes", call set_timer with action=play_media.
+- For requests like "run a scene/script after X minutes", call set_timer with action=run_script when a script is available.
 - Climate: for heating, cooling, AC or temperature changes, call set_climate.
 - Time and date: use the current context below. Do not call search_web for time/date.
 - Questions about current information, weather or news: call search_web, then answer with the result.
@@ -77,11 +79,34 @@ def build_tools(room_keys: list[str], vacuum_enabled: bool = False) -> list:
         ),
         types.FunctionDeclaration(
             name="set_timer",
-            description="Set countdown timer. Convert to seconds: 1 minuta=60, 30 sekund=30",
+            description=(
+                "Set countdown timer. Convert to seconds: 1 minuta=60, 30 sekund=30. "
+                "Use action=notify for a normal timer, action=play_media to play configured music/media after the timer, "
+                "or action=run_script to run a configured Home Assistant script after the timer."
+            ),
             parameters={"type": "object", "properties": {
                 "seconds": {"type": "number"},
                 "label": {"type": "string"},
+                "action": {"type": "string", "enum": ["notify", "play_media", "run_script"]},
+                "media_player_entity_id": {"type": "string"},
+                "media_url": {"type": "string"},
+                "media_content_type": {"type": "string"},
+                "script_id": {"type": "string"},
             }, "required": ["seconds"]},
+        ),
+        types.FunctionDeclaration(
+            name="list_timers",
+            description="List all active timers and their remaining time. Use for questions like 'how much time is left' or 'what timers are active'.",
+            parameters={"type": "object", "properties": {}},
+        ),
+        types.FunctionDeclaration(
+            name="cancel_timer",
+            description="Cancel active timer by id, exact label, or all timers. Use for requests like 'cancel timer', 'cancel music timer', or 'cancel all timers'.",
+            parameters={"type": "object", "properties": {
+                "timer_id": {"type": "string"},
+                "label": {"type": "string"},
+                "cancel_all": {"type": "boolean"},
+            }},
         ),
         types.FunctionDeclaration(
             name="search_web",

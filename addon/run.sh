@@ -11,6 +11,10 @@ export SYSTEM_PROMPT_TEMPLATE=$(bashio::config 'system_prompt_template')
 export ROOM_ALIASES_JSON=$(bashio::config 'room_aliases_json')
 export VACUUM_ENTITY_ID=$(bashio::config 'vacuum_entity_id')
 export HA_EXPOSED_ONLY=$(bashio::config 'ha_exposed_only')
+export TIMER_MEDIA_PLAYER_ENTITY_ID=$(bashio::config 'timer_media_player_entity_id')
+export TIMER_DEFAULT_MEDIA_URL=$(bashio::config 'timer_default_media_url')
+export TIMER_DEFAULT_MEDIA_CONTENT_TYPE=$(bashio::config 'timer_default_media_content_type')
+export TIMER_DEFAULT_SCRIPT_ID=$(bashio::config 'timer_default_script_id')
 export HA_URL="http://supervisor/core"
 export HA_TOKEN="${SUPERVISOR_TOKEN}"
 

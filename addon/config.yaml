@@ -1,6 +1,6 @@
 name: "Gemini Live Proxy"
 slug: gemini_live_proxy
-version: "1.0.11"
+version: "1.0.12"
 description: "WebSocket proxy between ESP32 Voice PE and Gemini Live API"
 arch:
   - aarch64
@@ -32,7 +32,9 @@ options:
     - Only choose non-local devices when the user explicitly refers to their room, person, or unique device name.
     - When the user asks for room lights, use control_room.
     - When the user asks for a specific device, use control_device.
-    - Timers: for countdown requests, call set_timer.
+    - Timers: for countdown requests, call set_timer. Use list_timers to answer timer status questions. Use cancel_timer to cancel timers.
+    - For requests like "play music after X minutes", call set_timer with action=play_media.
+    - For requests like "run a scene/script after X minutes", call set_timer with action=run_script when a script is available.
     - Climate: for heating, cooling, AC or temperature changes, call set_climate.
     - Time and date: use the current context below. Do not call search_web for time/date.
     - Questions about current information, weather or news: call search_web, then answer with the result.
@@ -46,6 +48,10 @@ options:
   room_aliases_json: "{}"
   vacuum_entity_id: ""
   ha_exposed_only: true
+  timer_media_player_entity_id: ""
+  timer_default_media_url: ""
+  timer_default_media_content_type: "music"
+  timer_default_script_id: ""
 schema:
   gemini_api_key: str
   gemini_model: str?
@@ -56,6 +62,10 @@ schema:
   room_aliases_json: str?
   vacuum_entity_id: str?
   ha_exposed_only: bool?
+  timer_media_player_entity_id: str?
+  timer_default_media_url: str?
+  timer_default_media_content_type: str?
+  timer_default_script_id: str?
 startup: application
 boot: auto
 init: false
