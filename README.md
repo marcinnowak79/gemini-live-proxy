@@ -1,5 +1,17 @@
 # Gemini Live Proxy for Home Assistant Voice PE
 
+Experimental first beta of a Gemini Live based voice flow for Home Assistant Voice PE.
+
+This project exists because I wanted to reduce perceived response latency and make the conversation feel more natural. The standard Home Assistant Voice Assistant flow did not give me the streaming behavior I wanted: it records the utterance, sends it after capture, then waits for the response. This add-on is paired with custom ESPHome firmware so the device can stream microphone audio continuously to Gemini Live and play response audio as soon as it is available.
+
+The matching firmware fork is here:
+
+- [Home Assistant Voice PE Gemini firmware](https://github.com/marcinnowak79/home-assistant-voice-pe/tree/gemini-live-proxy)
+
+This is not an official Home Assistant, ESPHome, Nabu Casa, or Google project. It was vibe-coded as a working experiment and is published mainly as inspiration for people exploring lower-latency voice assistant flows. Treat it as beta software: read the code, adapt it to your setup, and do not assume production-level stability or security hardening.
+
+## What It Does
+
 WebSocket bridge between an ESPHome firmware running on Home Assistant Voice PE and the Gemini Live API. The Home Assistant add-on exposes:
 
 - `8765/tcp` - WebSocket audio/control channel for the ESP32 firmware
