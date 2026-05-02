@@ -1,0 +1,46 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install validation dependencies
+        run: python -m pip install pyyaml
+
+      - name: Validate YAML
+        run: |
+          python - <<'PY'
+          import yaml
+          for path in ["repository.yaml", "addon/config.yaml"]:
+              with open(path) as f:
+                  yaml.safe_load(f)
+              print(f"OK {path}")
+          PY
+
+      - name: Compile Python
+        run: |
+          python -m py_compile \
+            proxy_server.py \
+            gemini_session.py \
+            ha_client.py \
+            addon/proxy_server.py \
+            addon/gemini_session.py \
+            addon/ha_client.py
+
+      - name: Check publishable files for obvious local secrets
+        run: |
+          ! grep -RInE 'AIza|Bearer [A-Za-z0-9_.-]+|password: "[^"]+"|192\.168\.8\.|/Users/' \
+            --exclude-dir=.git \
+            --exclude=.env \
+            --exclude='*.pyc' \
+            .

@@ -1,0 +1,150 @@
+# Gemini Live Proxy Documentation
+
+Gemini Live Proxy connects Home Assistant Voice PE firmware to the Gemini Live API.
+
+The add-on runs two local services:
+
+- WebSocket server on `8765/tcp` for microphone audio and control messages from the ESP32.
+- HTTP server on `8766/tcp` for response audio streamed back to the ESP32 media player.
+
+## Requirements
+
+- Home Assistant OS or Home Assistant Supervised with Supervisor add-ons enabled.
+- A Gemini API key with access to the Gemini Live model configured in the add-on.
+- ESPHome firmware built from the matching `home-assistant-voice-gemini.yaml` configuration.
+- The Voice PE device and Home Assistant host must be reachable on the same network.
+
+## Add-on Options
+
+### `gemini_api_key`
+
+Required. Your Google Gemini API key.
+
+Do not share logs or screenshots that expose this value.
+
+### `gemini_model`
+
+Gemini Live model name. The default is:
+
+```text
+gemini-3.1-flash-live-preview
+```
+
+### `gemini_voice`
+
+Gemini prebuilt voice name. The default is:
+
+```text
+Aoede
+```
+
+Restart the add-on after changing the voice.
+
+### `assistant_language`
+
+BCP-47 language code used for speech configuration.
+
+Examples:
+
+```text
+en-US
+pl-PL
+de-DE
+```
+
+### `assistant_response_language`
+
+Language phrase inserted into the system prompt.
+
+Examples:
+
+```text
+English
+Polish
+German
+```
+
+### `system_prompt_template`
+
+Full system prompt template sent to Gemini.
+
+Supported placeholders:
+
+- `{entities}` - entity list exposed to Gemini.
+- `{context}` - Home Assistant time, timezone and location context.
+- `{response_language}` - value from `assistant_response_language`.
+
+Keep `{entities}` and `{context}` unless you intentionally want to hide devices or context from Gemini.
+
+### `room_aliases_json`
+
+Optional JSON object mapping entity ID prefixes to room names.
+
+Example:
+
+```json
+{"living_room":"living room","bedroom":"bedroom","kitchen":"kitchen"}
+```
+
+The add-on prefers Home Assistant `area_id` where available. Prefix aliases are a fallback for entities without area metadata.
+
+### `vacuum_entity_id`
+
+Optional Home Assistant vacuum entity ID. Setting this enables the `control_vacuum` tool.
+
+Example:
+
+```text
+vacuum.robot_vacuum
+```
+
+Leave empty if you do not want Gemini to control a vacuum.
+
+### `ha_exposed_only`
+
+When `true`, Gemini receives only entities exposed to Home Assistant Assist/Conversation.
+
+This is the recommended default because it reduces prompt size and avoids exposing private or technical entities. Set it to `false` only if you deliberately want Gemini to see every supported entity from the Home Assistant entity registry.
+
+## ESPHome Configuration
+
+Set the proxy URL in your ESPHome `secrets.yaml`:
+
+```yaml
+gemini_proxy_url: "ws://homeassistant.local:8765"
+```
+
+If mDNS does not work in your network, use the Home Assistant IP address:
+
+```yaml
+gemini_proxy_url: "ws://192.168.1.10:8765"
+```
+
+## Troubleshooting
+
+### Add-on starts but the device does not respond
+
+Check that ports are reachable from your computer or from the same network:
+
+```bash
+nc -zv homeassistant.local 8765
+nc -zv homeassistant.local 8766
+```
+
+Check add-on logs:
+
+```bash
+ha addons logs local_gemini_live_proxy
+```
+
+### Gemini sees the wrong devices
+
+Keep `ha_exposed_only` enabled and expose the desired entities to Assist in Home Assistant. If entities do not have Home Assistant areas, configure `room_aliases_json`.
+
+### The Home Assistant UI shows an update that fails
+
+For local add-ons, make sure only one add-on folder with the same `slug` exists under `/addons/local`. Duplicate local folders with the same slug can confuse Supervisor update/build resolution.
+
+### WebSocket handshake errors appear after port checks
+
+Plain TCP checks such as `nc -zv` connect to the WebSocket port without sending a WebSocket HTTP upgrade request. This can create harmless `opening handshake failed` log entries.

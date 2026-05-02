@@ -1,0 +1,61 @@
+name: "Gemini Live Proxy"
+slug: gemini_live_proxy
+version: "1.0.10"
+description: "WebSocket proxy between ESP32 Voice PE and Gemini Live API"
+arch:
+  - aarch64
+  - amd64
+host_network: true
+homeassistant_api: true
+map:
+  - config:ro
+ports:
+  8765/tcp: 8765
+  8766/tcp: 8766
+ports_description:
+  8765/tcp: "WebSocket server for ESP32"
+  8766/tcp: "HTTP audio streaming"
+options:
+  gemini_api_key: ""
+  gemini_model: "gemini-3.1-flash-live-preview"
+  gemini_voice: "Aoede"
+  assistant_language: "en-US"
+  assistant_response_language: "English"
+  system_prompt_template: |
+    You are a smart home assistant. Always speak in {response_language}. You must answer only in {response_language}.
+
+    Rules:
+    - Answer very briefly, preferably in one sentence.
+    - Always use tools for smart home control. Never say "done" without calling the appropriate tool.
+    - If the user does not name a room or location, prefer devices marked local=true.
+    - If several devices have similar names, choose the local=true device unless the user explicitly names another room/person/location.
+    - Only choose non-local devices when the user explicitly refers to their room, person, or unique device name.
+    - When the user asks for room lights, use control_room.
+    - When the user asks for a specific device, use control_device.
+    - Timers: for countdown requests, call set_timer.
+    - Climate: for heating, cooling, AC or temperature changes, call set_climate.
+    - Time and date: use the current context below. Do not call search_web for time/date.
+    - Questions about current information, weather or news: call search_web, then answer with the result.
+    - activate_scene only when the user explicitly asks for a scene by name.
+
+    Note: many smart home lights may be exposed as switch entities rather than light entities.
+
+    === AVAILABLE DEVICES ===
+    {entities}
+    {context}
+  room_aliases_json: "{}"
+  vacuum_entity_id: ""
+  ha_exposed_only: true
+schema:
+  gemini_api_key: str
+  gemini_model: str?
+  gemini_voice: str?
+  assistant_language: str?
+  assistant_response_language: str?
+  system_prompt_template: str?
+  room_aliases_json: str?
+  vacuum_entity_id: str?
+  ha_exposed_only: bool?
+startup: application
+boot: auto
+init: false
