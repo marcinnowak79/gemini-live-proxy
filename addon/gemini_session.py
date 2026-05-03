@@ -96,6 +96,15 @@ def build_tools(room_keys: list[str], vacuum_enabled: bool = False) -> list:
             }, "required": ["entity_id"]},
         ),
         types.FunctionDeclaration(
+            name="get_printer_status",
+            description=(
+                "Get current Prusa Core One printer status in one call. "
+                "Use when the user asks about printer state, print progress, nozzle or hotend "
+                "temperature, what is printing, or when the print is expected to finish."
+            ),
+            parameters={"type": "object", "properties": {}},
+        ),
+        types.FunctionDeclaration(
             name="get_room_state",
             description=(
                 "Get current states for all light/switch entities in a room on demand. "

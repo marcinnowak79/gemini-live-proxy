@@ -23,7 +23,16 @@ def debug_log(message: str):
     if DEBUG_LOGGING:
         print(message, flush=True)
 
-DEFAULT_ACTIONABLE_DOMAINS = {"switch", "light", "climate", "scene", "script", "vacuum", "media_player"}
+DEFAULT_ACTIONABLE_DOMAINS = {
+    "switch",
+    "light",
+    "climate",
+    "scene",
+    "script",
+    "vacuum",
+    "media_player",
+    "sensor",
+}
 ACTIONABLE_DOMAINS = {
     item.strip()
     for item in os.getenv("HA_ACTIONABLE_DOMAINS", ",".join(sorted(DEFAULT_ACTIONABLE_DOMAINS))).split(",")
@@ -219,6 +228,30 @@ async def get_entity_state_details(entity_id: str) -> dict:
         return await _read_entity_state(session, entity_id)
 
 
+async def get_printer_status() -> dict:
+    """Read the key Prusa printer status sensors in one call."""
+    entity_ids = {
+        "printer_state": "sensor.prusa_core_one",
+        "progress_percent": "sensor.prusa_core_one_postep",
+        "nozzle_temperature": "sensor.prusa_core_one_temperatura_dyszy",
+        "estimated_finish": "sensor.prusa_core_one_zakonczenie_drukowania",
+        "file_name": "sensor.prusa_core_one_nazwa_pliku",
+    }
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(
+            *(_read_entity_state(session, entity_id) for entity_id in entity_ids.values()),
+        )
+
+    by_entity = {item.get("entity_id"): item for item in results}
+    status = {"status": "ok"}
+    for key, entity_id in entity_ids.items():
+        item = by_entity.get(entity_id, {})
+        status[key] = item.get("state")
+        if item.get("attributes"):
+            status[f"{key}_attributes"] = item["attributes"]
+    return status
+
+
 async def get_room_state(room: str, room_lights: dict) -> dict:
     """Read current HA states for light/switch entities in one room on demand."""
     entity_ids = room_lights.get(room, [])
@@ -314,6 +347,9 @@ async def execute_function(name: str, args: dict, room_lights: dict) -> dict:
 
     elif name == "get_device_state":
         return await get_entity_state_details(args["entity_id"])
+
+    elif name == "get_printer_status":
+        return await get_printer_status()
 
     elif name == "get_room_state":
         return await get_room_state(args["room"], room_lights)
