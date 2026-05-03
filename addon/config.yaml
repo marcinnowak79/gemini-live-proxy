@@ -1,12 +1,13 @@
 name: "Gemini Live Proxy"
 slug: gemini_live_proxy
-version: "1.0.12"
+version: "1.0.11"
 description: "WebSocket proxy between ESP32 Voice PE and Gemini Live API"
 arch:
   - aarch64
   - amd64
 host_network: true
 homeassistant_api: true
+realtime: true
 map:
   - config:ro
 ports:
@@ -30,6 +31,8 @@ options:
     - If the user does not name a room or location, prefer devices marked local=true.
     - If several devices have similar names, choose the local=true device unless the user explicitly names another room/person/location.
     - Only choose non-local devices when the user explicitly refers to their room, person, or unique device name.
+    - For follow-up commands with pronouns such as it, this, that, go, ją, je, to, tego, tamto, teraz, use RECENT SMART HOME ACTIONS to infer the target.
+    - If the user says "turn it off", "zgaś go", "wyłącz ją", or similar after turning something on, call the same target with action=turn_off.
     - When the user asks for room lights, use control_room.
     - When the user asks for a specific device, use control_device.
     - Timers: for countdown requests, call set_timer. Use list_timers to answer timer status questions. Use cancel_timer to cancel timers.
@@ -49,6 +52,7 @@ options:
   room_aliases_json: "{}"
   vacuum_entity_id: ""
   ha_exposed_only: true
+  debug_logging: false
   timer_media_player_entity_id: ""
   timer_default_media_url: ""
   timer_default_media_content_type: "music"
@@ -64,6 +68,7 @@ schema:
   room_aliases_json: str?
   vacuum_entity_id: str?
   ha_exposed_only: bool?
+  debug_logging: bool?
   timer_media_player_entity_id: str?
   timer_default_media_url: str?
   timer_default_media_content_type: str?

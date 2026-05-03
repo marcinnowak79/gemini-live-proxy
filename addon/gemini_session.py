@@ -16,6 +16,13 @@ ASSISTANT_RESPONSE_LANGUAGE = os.getenv("ASSISTANT_RESPONSE_LANGUAGE", "English"
 RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION = float(os.getenv("RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION", "1.5"))
 RECEIVE_IDLE_TIMEOUT_AFTER_AUDIO = float(os.getenv("RECEIVE_IDLE_TIMEOUT_AFTER_AUDIO", "1.2"))
 RECEIVE_IDLE_TIMEOUT_GENERAL = float(os.getenv("RECEIVE_IDLE_TIMEOUT_GENERAL", "8.0"))
+GEMINI_SILENCE_DURATION_MS = int(os.getenv("GEMINI_SILENCE_DURATION_MS", "1100"))
+DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").lower() in ("1", "true", "yes", "on")
+
+
+def debug_log(message: str):
+    if DEBUG_LOGGING:
+        print(message, flush=True)
 
 DEFAULT_SYSTEM_PROMPT_TEMPLATE = """You are a smart home assistant. Always speak in {response_language}. You must answer only in {response_language}.
 
@@ -25,6 +32,8 @@ Rules:
 - If the user does not name a room or location, prefer devices marked local=true.
 - If several devices have similar names, choose the local=true device unless the user explicitly names another room/person/location.
 - Only choose non-local devices when the user explicitly refers to their room, person, or unique device name.
+- For follow-up commands with pronouns such as it, this, that, go, ją, je, to, tego, tamto, teraz, use RECENT SMART HOME ACTIONS to infer the target.
+- If the user says "turn it off", "zgaś go", "wyłącz ją", or similar after turning something on, call the same target with action=turn_off.
 - When the user asks for room lights, use control_room.
 - When the user asks for a specific device, use control_device.
 - Timers: for countdown requests, call set_timer. Use list_timers to answer timer status questions. Use cancel_timer to cancel timers.
@@ -44,6 +53,15 @@ Note: many smart home lights may be exposed as switch entities rather than light
 """
 
 SYSTEM_PROMPT_TEMPLATE = os.getenv("SYSTEM_PROMPT_TEMPLATE", DEFAULT_SYSTEM_PROMPT_TEMPLATE)
+
+FOLLOW_UP_RESOLUTION_PROMPT = """
+=== FOLLOW-UP TARGET RESOLUTION ===
+Use RECENT SMART HOME ACTIONS to resolve short follow-up commands that refer to a previous target.
+This is especially important for pronouns and ellipsis such as it, this, that, go, ją, je, to, tego, tamto, teraz.
+If the user says "turn it off", "zgaś go", "wyłącz ją", "a teraz zgaś", or similar after a successful turn_on action, call the same entity with action=turn_off.
+If the user says a follow-up command without naming a room or device, prefer the most recent matching entity or room from RECENT SMART HOME ACTIONS.
+=== END FOLLOW-UP TARGET RESOLUTION ===
+"""
 
 
 def build_tools(room_keys: list[str], vacuum_enabled: bool = False) -> list:
@@ -189,6 +207,7 @@ class GeminiSession:
                 role = "Użytkownik" if h["role"] == "user" else "Asystent"
                 prompt += f"{role}: {h['text']}\n"
             prompt += "=== KONIEC ===\n"
+        prompt += FOLLOW_UP_RESOLUTION_PROMPT
         return prompt
 
     async def stream_audio(
@@ -217,7 +236,7 @@ class GeminiSession:
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
                     end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
-                    silence_duration_ms=500,
+                    silence_duration_ms=GEMINI_SILENCE_DURATION_MS,
                 ),
                 activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
             ),
@@ -239,12 +258,12 @@ class GeminiSession:
                     async for chunk in audio_chunks:
                         chunk_n += 1
                         if chunk_n == 1:
-                            print(f"  [gemini] Sending audio to Gemini...", flush=True)
+                            debug_log("  [gemini] Sending audio to Gemini...")
                         await session.send_realtime_input(
                             audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"),
                         )
                     await session.send_realtime_input(audio_stream_end=True)
-                    print(f"  [gemini] Audio stream ended, {chunk_n} chunks ({(time.monotonic()-t0)*1000:.0f}ms)", flush=True)
+                    debug_log(f"  [gemini] Audio stream ended, {chunk_n} chunks ({(time.monotonic()-t0)*1000:.0f}ms)")
                 except Exception as e:
                     print(f"  [gemini] SEND ERROR after {chunk_n} chunks: {e}", flush=True)
                 finally:
@@ -267,10 +286,9 @@ class GeminiSession:
                         try:
                             message = await asyncio.wait_for(messages.__anext__(), timeout=idle_timeout)
                         except asyncio.TimeoutError:
-                            print(
+                            debug_log(
                                 f"  [gemini] Receive idle timeout after {idle_timeout:.1f}s "
-                                f"(functions={function_calls_list}, audio_chunks={len(response_audio_chunks)})",
-                                flush=True,
+                                f"(functions={function_calls_list}, audio_chunks={len(response_audio_chunks)})"
                             )
                             break
                         except StopAsyncIteration:
@@ -284,7 +302,7 @@ class GeminiSession:
                                     responding_signaled = True
                                     if self.on_responding:
                                         self.on_responding()
-                                    print(f"  [gemini] Responding ({(time.monotonic()-t0)*1000:.0f}ms)", flush=True)
+                                    debug_log(f"  [gemini] Responding ({(time.monotonic()-t0)*1000:.0f}ms)")
                                 for part in sc.model_turn.parts:
                                     if part.inline_data:
                                         response_audio_chunks.append(part.inline_data.data)
@@ -300,11 +318,11 @@ class GeminiSession:
                                 responding_signaled = True
                                 if self.on_responding:
                                     self.on_responding()
-                                print(f"  [gemini] Tool call received, stopping mic ({(time.monotonic()-t0)*1000:.0f}ms)", flush=True)
+                                debug_log(f"  [gemini] Tool call received, stopping mic ({(time.monotonic()-t0)*1000:.0f}ms)")
                             responses = []
                             for fc in tc.function_calls:
                                 args_dict = dict(fc.args)
-                                print(f"  [gemini] FC: {fc.name}({fc.args})", flush=True)
+                                debug_log(f"  [gemini] FC: {fc.name}({fc.args})")
                                 function_calls_list.append(f"{fc.name}({args_dict})")
                                 if fc.name == "search_web":
                                     result = await self._do_search(args_dict.get("query", ""))
@@ -324,30 +342,31 @@ class GeminiSession:
             async def heartbeat():
                 while True:
                     await asyncio.sleep(5)
-                    print(f"  [gemini] ...still waiting ({(time.monotonic()-t0)*1000:.0f}ms, sent_done={send_done}, responding={responding_signaled})", flush=True)
+                    debug_log(f"  [gemini] ...still waiting ({(time.monotonic()-t0)*1000:.0f}ms, sent_done={send_done}, responding={responding_signaled})")
 
             # Run send + receive, cancel heartbeat when done
-            hb_task = asyncio.create_task(heartbeat())
+            hb_task = asyncio.create_task(heartbeat()) if DEBUG_LOGGING else None
             try:
                 await asyncio.gather(send_audio(), receive_response())
             finally:
-                hb_task.cancel()
+                if hb_task is not None:
+                    hb_task.cancel()
 
             response_text = "".join(response_text_parts)
             function_calls_made = " ".join(function_calls_list)
 
         total_ms = (time.monotonic() - t0) * 1000
-        print(f"  [gemini] TOTAL: {total_ms:.0f}ms", flush=True)
+        debug_log(f"  [gemini] TOTAL: {total_ms:.0f}ms")
 
         if response_audio_chunks:
             total_audio = sum(len(c) for c in response_audio_chunks)
-            print(f"  [gemini] Streamed {len(response_audio_chunks)} audio chunks, {total_audio}B ({total_audio/48000:.1f}s)", flush=True)
+            debug_log(f"  [gemini] Streamed {len(response_audio_chunks)} audio chunks, {total_audio}B ({total_audio/48000:.1f}s)")
 
         return function_calls_made.strip() or response_text or ""
 
     async def _do_search(self, query: str) -> dict:
         """Search web using Gemini generate_content + Google Search."""
-        print(f"  [search] {query}")
+        debug_log(f"  [search] {query}")
         try:
             response = await self.client.aio.models.generate_content(
                 model="gemini-2.5-flash",
@@ -356,7 +375,7 @@ class GeminiSession:
                     tools=[types.Tool(google_search=types.GoogleSearch())],
                 ),
             )
-            print(f"  [search] → {response.text[:100]}")
+            debug_log(f"  [search] -> {response.text[:100]}")
             return {"result": response.text}
         except Exception as err:
             print(f"  [search] ERROR: {err}")

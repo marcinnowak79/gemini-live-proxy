@@ -5,14 +5,23 @@ import json
 import os
 
 import aiohttp
+from dotenv import load_dotenv
 
-HA_URL = os.getenv("HA_URL", "http://supervisor/core")
-HA_TOKEN = os.getenv("HA_TOKEN", os.getenv("SUPERVISOR_TOKEN", ""))
+load_dotenv()
+
+HA_URL = os.getenv("HA_URL", "http://homeassistant.local:8123")
+HA_TOKEN = os.getenv("HA_TOKEN", "")
 ENTITY_REGISTRY_PATH = os.getenv("HA_ENTITY_REGISTRY_PATH", "/config/.storage/core.entity_registry")
 DEVICE_REGISTRY_PATH = os.getenv("HA_DEVICE_REGISTRY_PATH", "/config/.storage/core.device_registry")
 EXPOSED_ONLY = os.getenv("HA_EXPOSED_ONLY", "true").lower() not in ("0", "false", "no")
 VACUUM_ENTITY_ID = os.getenv("VACUUM_ENTITY_ID", "").strip()
 LOCAL_AREA_ID = os.getenv("LOCAL_AREA_ID", "").strip()
+DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").lower() in ("1", "true", "yes", "on")
+
+
+def debug_log(message: str):
+    if DEBUG_LOGGING:
+        print(message, flush=True)
 
 DEFAULT_ACTIONABLE_DOMAINS = {"switch", "light", "climate", "scene", "script", "vacuum", "media_player"}
 ACTIONABLE_DOMAINS = {
@@ -116,9 +125,8 @@ async def get_exposed_entities() -> tuple[str, dict[str, list[str]], str]:
                     break
 
     room_summary = {room: len(entities) for room, entities in sorted(room_lights.items())}
-    print(
+    debug_log(
         f"[ha] Loaded {len(lines)} actionable entities; local_area={local_area_id or 'none'}; room light groups: {room_summary}",
-        flush=True,
     )
     return "\n".join(lines), room_lights, local_area_id
 
@@ -145,11 +153,11 @@ async def get_ha_context() -> str:
 async def call_ha_service(domain: str, service: str, data: dict) -> dict:
     """Call HA service."""
     url = f"{HA_URL}/api/services/{domain}/{service}"
-    print(f"[ha] Calling {domain}.{service}: {data}", flush=True)
+    debug_log(f"[ha] Calling {domain}.{service}: {data}")
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=data, headers=HEADERS) as resp:
             if resp.status == 200:
-                print(f"[ha] {domain}.{service} OK", flush=True)
+                debug_log(f"[ha] {domain}.{service} OK")
                 return {"status": "ok"}
             text = await resp.text()
             print(f"[ha] {domain}.{service} ERROR HTTP {resp.status}: {text}", flush=True)
@@ -173,7 +181,7 @@ async def verify_entity_states(entity_ids: list[str], action: str) -> dict:
     """Verify HA state after a switch/light action."""
     if action not in ("turn_on", "turn_off"):
         states = {entity_id: await get_entity_state(entity_id) for entity_id in entity_ids}
-        print(f"[ha] Post-action states for {action}: {states}", flush=True)
+        debug_log(f"[ha] Post-action states for {action}: {states}")
         return {"verified": True, "states": states}
 
     expected = "on" if action == "turn_on" else "off"
@@ -186,7 +194,7 @@ async def verify_entity_states(entity_ids: list[str], action: str) -> dict:
             if state is not None and state != expected
         }
         if not mismatched:
-            print(f"[ha] Verified {action}: {states}", flush=True)
+            debug_log(f"[ha] Verified {action}: {states}")
             return {"verified": True, "expected": expected, "states": states}
 
     print(f"[ha] Verification failed for {action}: expected={expected}, states={states}", flush=True)
@@ -213,14 +221,15 @@ async def call_and_verify_ha_service(action: str, entity_ids: str | list[str]) -
 
 async def execute_function(name: str, args: dict, room_lights: dict) -> dict:
     """Execute a Gemini function call against HA."""
-    print(f"[ha] Function {name}: {args}", flush=True)
+    debug_log(f"[ha] Function {name}: {args}")
     if name == "control_device":
         return await call_and_verify_ha_service(args["action"], args["entity_id"])
 
     elif name == "control_room":
         entities = room_lights.get(args["room"], [])
         if entities:
-            print(f"[ha] control_room room={args['room']} entities={entities}", flush=True)
+            # Batch: HA accepts list of entity_ids in single call
+            debug_log(f"[ha] control_room room={args['room']} entities={entities}")
             return await call_and_verify_ha_service(args["action"], entities)
         available_rooms = sorted(room_lights.keys())
         print(
