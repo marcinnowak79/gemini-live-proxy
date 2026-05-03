@@ -36,6 +36,8 @@ Rules:
 - If the user says "turn it off", "zgaś go", "wyłącz ją", or similar after turning something on, call the same target with action=turn_off.
 - When the user asks for room lights, use control_room.
 - When the user asks for a specific device, use control_device.
+- When the user asks whether a device is on/off or asks for a current device value, call get_device_state.
+- When the user asks what is on/off in a room, call get_room_state.
 - Timers: for countdown requests, call set_timer. Use list_timers to answer timer status questions. Use cancel_timer to cancel timers.
 - When a timer alarm is ringing and the user says "stop", "enough", "wystarczy", "stop timer", or similar, call stop_timer_alarm.
 - For requests like "play music after X minutes", call set_timer with action=play_media.
@@ -81,6 +83,27 @@ def build_tools(room_keys: list[str], vacuum_enabled: bool = False) -> list:
                 "room": {"type": "string", "enum": room_keys if room_keys else ["default"]},
                 "action": {"type": "string", "enum": ["turn_on", "turn_off"]},
             }, "required": ["room", "action"]},
+        ),
+        types.FunctionDeclaration(
+            name="get_device_state",
+            description=(
+                "Get the current Home Assistant state of one entity on demand. "
+                "Use for questions asking whether a device is on/off or asking for current values "
+                "such as temperature, battery, media state, or availability."
+            ),
+            parameters={"type": "object", "properties": {
+                "entity_id": {"type": "string"},
+            }, "required": ["entity_id"]},
+        ),
+        types.FunctionDeclaration(
+            name="get_room_state",
+            description=(
+                "Get current states for all light/switch entities in a room on demand. "
+                "Use for questions like whether lights are on in a room or what is still on."
+            ),
+            parameters={"type": "object", "properties": {
+                "room": {"type": "string", "enum": room_keys if room_keys else ["default"]},
+            }, "required": ["room"]},
         ),
         types.FunctionDeclaration(
             name="activate_scene",

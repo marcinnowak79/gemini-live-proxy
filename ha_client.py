@@ -49,6 +49,18 @@ def _load_room_aliases() -> dict[str, str]:
 PREFIX_TO_ROOM = _load_room_aliases()
 
 HEADERS = {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
+STATE_ATTRIBUTE_ALLOWLIST = {
+    "battery_level",
+    "brightness",
+    "current_temperature",
+    "device_class",
+    "friendly_name",
+    "hvac_action",
+    "media_title",
+    "temperature",
+    "unit_of_measurement",
+    "volume_level",
+}
 
 
 def is_vacuum_enabled() -> bool:
@@ -166,15 +178,90 @@ async def call_ha_service(domain: str, service: str, data: dict) -> dict:
 
 async def get_entity_state(entity_id: str) -> str | None:
     """Read a single HA entity state."""
+    data = await get_entity_state_details(entity_id)
+    if data.get("status") != "ok":
+        return None
+    return data.get("state")
+
+
+async def _read_entity_state(session: aiohttp.ClientSession, entity_id: str) -> dict:
+    """Read one HA state object and return a compact result for tools."""
     url = f"{HA_URL}/api/states/{entity_id}"
+    async with session.get(url, headers=HEADERS) as resp:
+        if resp.status != 200:
+            text = await resp.text()
+            print(f"[ha] State read failed for {entity_id}: HTTP {resp.status}: {text}", flush=True)
+            return {
+                "status": "error",
+                "entity_id": entity_id,
+                "message": f"HTTP {resp.status}: {text}",
+            }
+        data = await resp.json()
+        attributes = data.get("attributes") or {}
+        compact_attributes = {
+            key: value
+            for key, value in attributes.items()
+            if key in STATE_ATTRIBUTE_ALLOWLIST and value is not None
+        }
+        return {
+            "status": "ok",
+            "entity_id": entity_id,
+            "state": data.get("state"),
+            "attributes": compact_attributes,
+            "last_changed": data.get("last_changed"),
+            "last_updated": data.get("last_updated"),
+        }
+
+
+async def get_entity_state_details(entity_id: str) -> dict:
+    """Read current HA state for a single entity on demand."""
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=HEADERS) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                print(f"[ha] State read failed for {entity_id}: HTTP {resp.status}: {text}", flush=True)
-                return None
-            data = await resp.json()
-            return data.get("state")
+        return await _read_entity_state(session, entity_id)
+
+
+async def get_room_state(room: str, room_lights: dict) -> dict:
+    """Read current HA states for light/switch entities in one room on demand."""
+    entity_ids = room_lights.get(room, [])
+    if not entity_ids:
+        available_rooms = sorted(room_lights.keys())
+        return {
+            "status": "error",
+            "message": f"No light/switch entities configured for room {room}",
+            "available_rooms": available_rooms,
+        }
+
+    async with aiohttp.ClientSession() as session:
+        states = await asyncio.gather(
+            *(_read_entity_state(session, entity_id) for entity_id in entity_ids),
+        )
+
+    on_entities = [
+        item["entity_id"]
+        for item in states
+        if item.get("status") == "ok" and item.get("state") == "on"
+    ]
+    off_entities = [
+        item["entity_id"]
+        for item in states
+        if item.get("status") == "ok" and item.get("state") == "off"
+    ]
+    unavailable_entities = [
+        item["entity_id"]
+        for item in states
+        if item.get("status") != "ok" or item.get("state") in ("unavailable", "unknown")
+    ]
+    return {
+        "status": "ok",
+        "room": room,
+        "count": len(states),
+        "on_count": len(on_entities),
+        "off_count": len(off_entities),
+        "unavailable_count": len(unavailable_entities),
+        "on_entities": on_entities,
+        "off_entities": off_entities,
+        "unavailable_entities": unavailable_entities,
+        "states": states,
+    }
 
 
 async def verify_entity_states(entity_ids: list[str], action: str) -> dict:
@@ -224,6 +311,12 @@ async def execute_function(name: str, args: dict, room_lights: dict) -> dict:
     debug_log(f"[ha] Function {name}: {args}")
     if name == "control_device":
         return await call_and_verify_ha_service(args["action"], args["entity_id"])
+
+    elif name == "get_device_state":
+        return await get_entity_state_details(args["entity_id"])
+
+    elif name == "get_room_state":
+        return await get_room_state(args["room"], room_lights)
 
     elif name == "control_room":
         entities = room_lights.get(args["room"], [])

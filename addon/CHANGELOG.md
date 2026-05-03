@@ -4,6 +4,7 @@ All notable changes to this add-on are documented here.
 
 ## 1.0.12
 
+- Added on-demand Home Assistant state tools for individual devices and room light/switch groups.
 - Added persistent multi-timer support with voice-listable and voice-cancellable timers.
 - Added delayed timer actions for Home Assistant `media_player.play_media` and `script.turn_on`.
 - Play the configured default media on normal timer completion, not only for explicit media timers.
