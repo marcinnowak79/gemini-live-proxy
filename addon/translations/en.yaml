@@ -38,6 +38,9 @@ configuration:
   debug_logging:
     name: Debug logging
     description: Enables detailed proxy, timing and audio-stream logs. Useful for diagnosis; leave disabled day to day because logs become large and noisy.
+  response_prebuffer_ms:
+    name: Response prebuffer
+    description: How much Gemini response audio to buffer before the ESP32 starts HTTP playback. Higher values add a little latency but reduce stutters and restart-like glitches when Gemini audio arrives unevenly. Try 700-1200 ms if playback cuts out.
   timer_media_player_entity_id:
     name: Timer media player
     description: Entity ID of the player used for timer alarms/media, for example media_player.home_assistant_voice_0a32f9_media_player. If empty, timer audio actions may not work.

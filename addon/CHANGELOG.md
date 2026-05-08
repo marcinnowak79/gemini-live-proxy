@@ -2,6 +2,10 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.0.22
+
+- Increased the default response audio prebuffer and exposed it as an add-on option to reduce playback stutter.
+
 ## 1.0.21
 
 - Removed wake-word sample capture options and capture-only recording support from the main Gemini Live proxy add-on.

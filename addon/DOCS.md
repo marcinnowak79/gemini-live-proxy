@@ -12,6 +12,11 @@ option. The same English text is available for both English and Polish Home
 Assistant UI locales. Hover or open the help icon next to an option to see what
 it controls, how it affects runtime behavior, and typical values.
 
+`response_prebuffer_ms` controls how much Gemini response audio is collected
+before playback starts on the ESP32. Increase it when response audio stutters or
+appears to restart; decrease it only if minimizing first-audio latency matters
+more than playback smoothness.
+
 ## Requirements
 
 - Home Assistant OS or Home Assistant Supervised with Supervisor add-ons enabled.

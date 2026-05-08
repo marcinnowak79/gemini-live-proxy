@@ -1,6 +1,6 @@
 name: "Gemini Live Proxy"
 slug: gemini_live_proxy
-version: "1.0.21"
+version: "1.0.22"
 description: "WebSocket proxy between ESP32 Voice PE and Gemini Live API"
 image: "ghcr.io/marcinnowak79/gemini-live-proxy-{arch}"
 arch:
@@ -59,6 +59,7 @@ options:
   vacuum_entity_id: ""
   ha_exposed_only: true
   debug_logging: false
+  response_prebuffer_ms: 700
   timer_media_player_entity_id: ""
   timer_default_media_url: ""
   timer_default_media_content_type: "music"
@@ -78,6 +79,7 @@ schema:
   vacuum_entity_id: str?
   ha_exposed_only: bool?
   debug_logging: bool?
+  response_prebuffer_ms: int?
   timer_media_player_entity_id: str?
   timer_default_media_url: str?
   timer_default_media_content_type: str?

@@ -24,6 +24,7 @@ case "${DEBUG_LOGGING_CONFIG,,}" in
         ;;
 esac
 export TIMER_MEDIA_PLAYER_ENTITY_ID=$(bashio::config 'timer_media_player_entity_id')
+export RESPONSE_PREBUFFER_MS=$(bashio::config 'response_prebuffer_ms')
 export TIMER_DEFAULT_MEDIA_URL=$(bashio::config 'timer_default_media_url')
 export TIMER_DEFAULT_MEDIA_CONTENT_TYPE=$(bashio::config 'timer_default_media_content_type')
 export TIMER_DEFAULT_SCRIPT_ID=$(bashio::config 'timer_default_script_id')
