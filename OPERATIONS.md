@@ -24,12 +24,6 @@ The add-on is installed as:
 /addons/local/gemini-live-proxy
 ```
 
-Runtime captures are configured on Home Assistant under:
-
-```text
-/config/gemini-live-proxy/captures
-```
-
 ## Important Supervisor behavior
 
 Do not keep backups or copies of this add-on anywhere under `/addons`.

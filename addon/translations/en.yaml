@@ -38,15 +38,6 @@ configuration:
   debug_logging:
     name: Debug logging
     description: Enables detailed proxy, timing and audio-stream logs. Useful for diagnosis; leave disabled day to day because logs become large and noisy.
-  capture_enabled:
-    name: Sample capture mode
-    description: Allows firmware to send short recordings into capture_dir without opening a Gemini session. Used for collecting wake word samples; can be disabled for normal operation.
-  capture_dir:
-    name: Capture directory
-    description: Home Assistant path where capture samples are saved. Defaults to /config/gemini-live-proxy/captures with subdirectories such as positive, negative and noise.
-  capture_max_seconds:
-    name: Max sample duration
-    description: Maximum length of one capture recording in seconds. Usually 2-3 seconds is enough for a wake word; higher values create larger files.
   timer_media_player_entity_id:
     name: Timer media player
     description: Entity ID of the player used for timer alarms/media, for example media_player.home_assistant_voice_0a32f9_media_player. If empty, timer audio actions may not work.

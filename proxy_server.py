@@ -14,13 +14,11 @@ import json
 import logging
 import math
 import os
-from pathlib import Path
 import resource
 import struct
 import sys
 import time
 import uuid
-import wave
 
 import numpy as np
 import websockets
@@ -52,9 +50,6 @@ GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "1"))
 DIAG_EVENT_LOOP_LAG_WARN_MS = float(os.getenv("DIAG_EVENT_LOOP_LAG_WARN_MS", "250"))
 DIAG_EVENT_LOOP_INTERVAL_SECONDS = float(os.getenv("DIAG_EVENT_LOOP_INTERVAL_SECONDS", "0.25"))
 DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").lower() in ("1", "true", "yes", "on")
-CAPTURE_ENABLED = os.getenv("CAPTURE_ENABLED", "false").lower() in ("1", "true", "yes", "on")
-CAPTURE_DIR = Path(os.getenv("CAPTURE_DIR", "./captures"))
-CAPTURE_MAX_SECONDS = float(os.getenv("CAPTURE_MAX_SECONDS", "2.0"))
 RESPONSE_SAMPLE_RATE = 48000
 RESPONSE_SAMPLE_WIDTH = 2
 RESPONSE_PREBUFFER_MS = int(os.getenv("RESPONSE_PREBUFFER_MS", "180"))
@@ -238,98 +233,6 @@ def prepare_response_pcm(audio_data: bytes) -> bytes:
     return np.repeat(samples, 2).astype(np.int16).tobytes()
 
 
-def sanitize_capture_type(sample_type: str) -> str:
-    clean = "".join(ch for ch in sample_type.lower() if ch.isalnum() or ch in ("_", "-"))
-    if clean in ("positive", "negative", "noise"):
-        return clean
-    return "unknown"
-
-
-def save_capture_wav(sample_type: str, pcm_chunks: list[bytes]) -> Path:
-    sample_type = sanitize_capture_type(sample_type)
-    output_dir = CAPTURE_DIR / sample_type
-    output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    path = output_dir / f"{sample_type}_{timestamp}_{uuid.uuid4().hex[:8]}.wav"
-    pcm = b"".join(pcm_chunks)
-    with wave.open(str(path), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(16000)
-        wav.writeframes(pcm)
-    return path
-
-
-async def handle_capture_connection(websocket, sample_type: str, first_payload: bytes | None = None):
-    """Save ESP32 capture-only audio without opening a Gemini session."""
-    if not CAPTURE_ENABLED:
-        print("  [capture] Capture request rejected; capture_enabled=false", flush=True)
-        return
-
-    sample_type = sanitize_capture_type(sample_type)
-    chunks: list[bytes] = []
-    total_bytes = 0
-    started = time.monotonic()
-    if first_payload:
-        aligned_len = (len(first_payload) // 2) * 2
-        chunks.append(first_payload[:aligned_len])
-        total_bytes += aligned_len
-
-    reason = "unknown"
-    print(f"  [capture] Started sample_type={sample_type} handler=frame-debug-v2", flush=True)
-    try:
-        message_count = 0
-        while True:
-            elapsed = time.monotonic() - started
-            if elapsed >= CAPTURE_MAX_SECONDS + 2.0:
-                reason = "wall_timeout"
-                break
-
-            raw = await asyncio.wait_for(
-                websocket.recv(), timeout=max(0.2, min(1.0, CAPTURE_MAX_SECONDS + 2.0 - elapsed))
-            )
-            msg_type, data = unpack_message(raw)
-            message_count += 1
-            if message_count <= 20 or message_count % 50 == 0:
-                print(
-                    f"  [capture] msg#{message_count} type={msg_type} len={len(data)} "
-                    f"bytes={total_bytes}",
-                    flush=True,
-                )
-            if msg_type == MSG_AUDIO_END:
-                reason = "audio_end"
-                break
-            if msg_type != MSG_AUDIO_IN:
-                continue
-            aligned_len = (len(data) // 2) * 2
-            if aligned_len > 0:
-                chunks.append(data[:aligned_len])
-                total_bytes += aligned_len
-                if total_bytes >= int(16000 * 2 * CAPTURE_MAX_SECONDS):
-                    reason = "max_audio"
-                    break
-    except asyncio.TimeoutError:
-        reason = "timeout"
-    except websockets.exceptions.ConnectionClosed:
-        reason = "connection_closed"
-    finally:
-        duration = total_bytes / 32000 if total_bytes else 0.0
-        elapsed = time.monotonic() - started
-        if chunks:
-            path = save_capture_wav(sample_type, chunks)
-            print(
-                f"  [capture] Saved {path} reason={reason} chunks={len(chunks)} "
-                f"bytes={total_bytes} audio={duration:.2f}s elapsed={elapsed:.2f}s",
-                flush=True,
-            )
-        else:
-            print(
-                f"  [capture] No audio saved reason={reason} chunks=0 "
-                f"bytes=0 elapsed={elapsed:.2f}s",
-                flush=True,
-            )
-
-
 async def handle_function_call(name: str, args: dict, room_lights: dict,
                                 send_audio_cb) -> dict:
     """Handle function calls — HA actions + timers."""
@@ -434,10 +337,6 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             msg_type, data = unpack_message(raw)
 
             if msg_type != MSG_AUDIO_IN:
-                if msg_type == MSG_CAPTURE_START:
-                    sample_type = data.decode("utf-8", errors="replace").strip() or "unknown"
-                    await handle_capture_connection(websocket, sample_type)
-                    continue
                 continue
 
             t0 = time.monotonic()

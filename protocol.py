@@ -4,7 +4,6 @@ ESP32 → Proxy:
   0x01 + PCM bytes   = audio chunk from microphone
   0x02                = end of speech (audio_stream_end)
   0x03                = barge-in (interrupt playback)
-  0x10 + sample type  = start capture-only recording
 
 Proxy → ESP32:
   0x01 + PCM bytes   = audio chunk to play (stream immediately)
@@ -19,7 +18,6 @@ Proxy → ESP32:
 MSG_AUDIO_IN = 0x01
 MSG_AUDIO_END = 0x02
 MSG_BARGE_IN = 0x03
-MSG_CAPTURE_START = 0x10
 
 # Message types: Proxy → ESP32
 MSG_AUDIO_OUT = 0x01

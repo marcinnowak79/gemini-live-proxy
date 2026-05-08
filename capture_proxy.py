@@ -13,7 +13,9 @@ from pathlib import Path
 import numpy as np
 import websockets
 
-from protocol import MSG_AUDIO_END, MSG_AUDIO_IN, MSG_CAPTURE_START, unpack_message
+from protocol import MSG_AUDIO_END, MSG_AUDIO_IN, unpack_message
+
+MSG_CAPTURE_START = 0x10
 
 
 HOST = "0.0.0.0"
