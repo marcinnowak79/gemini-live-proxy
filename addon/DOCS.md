@@ -35,10 +35,32 @@ gemini-3.1-flash-live-preview
 Gemini prebuilt voice name. The default is:
 
 ```text
-Aoede
+Charon
 ```
 
 Restart the add-on after changing the voice.
+
+### `assistant_name`
+
+Persona name inserted into the assistant instruction block.
+
+### `assistant_gender`
+
+Controls grammatical self-reference instructions. Supported values:
+
+- `male`
+- `female`
+- `neutral`
+
+For Polish, `male` instructs the assistant to use forms such as `zrobiłem` and `jestem gotowy`.
+
+### `assistant_speaking_style`
+
+Short tone/style instruction appended to the prompt. Use this for guidance like:
+
+```text
+Steady, efficient, and unhurried. Tone is empathetic, crisp, reassuring, and lightly dry/sarcastic when appropriate.
+```
 
 ### `assistant_language`
 
@@ -73,8 +95,11 @@ Supported placeholders:
 - `{entities}` - entity list exposed to Gemini.
 - `{context}` - Home Assistant time, timezone and location context.
 - `{response_language}` - value from `assistant_response_language`.
+- `{assistant_name}`, `{assistant_gender}`, `{assistant_speaking_style}` - optional persona placeholders.
 
 Keep `{entities}` and `{context}` unless you intentionally want to hide devices or context from Gemini.
+
+Most users should edit `assistant_name`, `assistant_gender`, `assistant_speaking_style`, and `gemini_voice` instead of replacing the whole prompt.
 
 ### `room_aliases_json`
 

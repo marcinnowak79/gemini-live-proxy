@@ -10,7 +10,15 @@ from google import genai
 from google.genai import types
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-live-preview")
-GEMINI_VOICE = os.getenv("GEMINI_VOICE", "Aoede")
+GEMINI_VOICE = os.getenv("GEMINI_VOICE", "Charon")
+ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Dżefrej")
+ASSISTANT_GENDER = os.getenv("ASSISTANT_GENDER", "male")
+ASSISTANT_SPEAKING_STYLE = os.getenv(
+    "ASSISTANT_SPEAKING_STYLE",
+    "Steady, efficient, and unhurried. Tone is empathetic, crisp, reassuring, "
+    "and lightly dry/sarcastic when appropriate. Avoid exaggerated enthusiasm, "
+    "theatrical delivery, and long explanations.",
+)
 ASSISTANT_LANGUAGE = os.getenv("ASSISTANT_LANGUAGE", "en-US")
 ASSISTANT_RESPONSE_LANGUAGE = os.getenv("ASSISTANT_RESPONSE_LANGUAGE", "English")
 RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION = float(os.getenv("RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION", "1.5"))
@@ -55,6 +63,36 @@ Note: many smart home lights may be exposed as switch entities rather than light
 """
 
 SYSTEM_PROMPT_TEMPLATE = os.getenv("SYSTEM_PROMPT_TEMPLATE", DEFAULT_SYSTEM_PROMPT_TEMPLATE)
+
+def build_persona_prompt() -> str:
+    name = ASSISTANT_NAME.strip() or "Dżefrej"
+    gender = ASSISTANT_GENDER.strip().lower()
+    style = ASSISTANT_SPEAKING_STYLE.strip()
+
+    if gender == "male":
+        gender_instruction = (
+            f"Your name is {name}. You are male. If you refer to yourself, always use masculine "
+            "grammatical forms. In Polish, never describe yourself with feminine forms such as "
+            '"zrobiłam", "jestem gotowa", "odpowiedziałam". Use masculine forms such as '
+            '"zrobiłem", "jestem gotowy", "odpowiedziałem".'
+        )
+    elif gender == "female":
+        gender_instruction = (
+            f"Your name is {name}. You are female. If you refer to yourself, use feminine "
+            "grammatical forms where the response language requires gender."
+        )
+    else:
+        gender_instruction = (
+            f"Your name is {name}. Avoid unnecessarily gendered self-references unless the "
+            "user explicitly asks about your persona."
+        )
+
+    prompt = "\n=== ASSISTANT PERSONA AND SPEAKING STYLE ===\n"
+    prompt += gender_instruction + "\n"
+    if style:
+        prompt += f"Speaking style: {style}\n"
+    prompt += "=== END ASSISTANT PERSONA AND SPEAKING STYLE ===\n"
+    return prompt
 
 FOLLOW_UP_RESOLUTION_PROMPT = """
 === FOLLOW-UP TARGET RESOLUTION ===
@@ -232,7 +270,11 @@ class GeminiSession:
             entities=self.entity_list,
             context=f"{local_context}{self.ha_context}",
             response_language=ASSISTANT_RESPONSE_LANGUAGE,
+            assistant_name=ASSISTANT_NAME,
+            assistant_gender=ASSISTANT_GENDER,
+            assistant_speaking_style=ASSISTANT_SPEAKING_STYLE,
         )
+        prompt += build_persona_prompt()
         if self.history:
             prompt += "\n=== OSTATNIA ROZMOWA ===\n"
             for h in self.history:

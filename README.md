@@ -26,6 +26,9 @@ WebSocket bridge between an ESPHome firmware running on Home Assistant Voice PE 
 4. Optional options:
    - `gemini_model`: Gemini Live model name
    - `gemini_voice`: Gemini voice name
+   - `assistant_name`: assistant persona name
+   - `assistant_gender`: `male`, `female`, or `neutral`; used for self-reference grammar
+   - `assistant_speaking_style`: short voice/tone guidance appended to the prompt
    - `assistant_language`: BCP-47 language code, for example `pl-PL`
    - `assistant_response_language`: language phrase used in the prompt, for example `English`
    - `system_prompt_template`: full system prompt template shown to Gemini
@@ -49,8 +52,11 @@ The prompt template supports these placeholders:
 - `{entities}` - list of Home Assistant entities available to Gemini
 - `{context}` - current Home Assistant time zone, date/time and location context
 - `{response_language}` - value from `assistant_response_language`
+- `{assistant_name}`, `{assistant_gender}`, `{assistant_speaking_style}` - optional persona placeholders
 
 Keep `{entities}` and `{context}` in custom prompts unless you intentionally want to hide devices or context from Gemini.
+
+Persona and speaking style are also appended as a separate instruction block, so most users should edit `assistant_name`, `assistant_gender`, `assistant_speaking_style`, and `gemini_voice` instead of replacing the whole prompt.
 
 ### Local Add-on Deployment over SSH
 

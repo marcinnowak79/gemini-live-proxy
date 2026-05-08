@@ -14,11 +14,13 @@ import json
 import logging
 import math
 import os
+from pathlib import Path
 import resource
 import struct
 import sys
 import time
 import uuid
+import wave
 
 import numpy as np
 import websockets
@@ -50,6 +52,13 @@ GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "1"))
 DIAG_EVENT_LOOP_LAG_WARN_MS = float(os.getenv("DIAG_EVENT_LOOP_LAG_WARN_MS", "250"))
 DIAG_EVENT_LOOP_INTERVAL_SECONDS = float(os.getenv("DIAG_EVENT_LOOP_INTERVAL_SECONDS", "0.25"))
 DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").lower() in ("1", "true", "yes", "on")
+CAPTURE_ENABLED = os.getenv("CAPTURE_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+CAPTURE_DIR = Path(os.getenv("CAPTURE_DIR", "/config/gemini-live-proxy/captures"))
+CAPTURE_MAX_SECONDS = float(os.getenv("CAPTURE_MAX_SECONDS", "2.0"))
+RESPONSE_SAMPLE_RATE = 48000
+RESPONSE_SAMPLE_WIDTH = 2
+RESPONSE_PREBUFFER_MS = int(os.getenv("RESPONSE_PREBUFFER_MS", "180"))
+RESPONSE_PREBUFFER_BYTES = int(RESPONSE_SAMPLE_RATE * RESPONSE_SAMPLE_WIDTH * RESPONSE_PREBUFFER_MS / 1000)
 
 
 def debug_log(message: str):
@@ -118,7 +127,44 @@ def get_recent_action_context() -> str:
 timer_manager = TimerManager()
 
 # Streaming audio state keyed by one response session.
-_audio_sessions: dict[str, tuple[asyncio.Queue, asyncio.Event]] = {}
+class ResponseAudioSession:
+    """Replayable in-memory audio stream for ESP32 HTTP media requests."""
+
+    def __init__(self):
+        self.ready = asyncio.Event()
+        self.closed = False
+        self.chunks: list[bytes] = []
+        self.condition = asyncio.Condition()
+
+    async def append(self, chunk: bytes):
+        if not chunk:
+            return
+        async with self.condition:
+            self.chunks.append(chunk)
+            self.condition.notify_all()
+
+    async def close(self):
+        async with self.condition:
+            self.closed = True
+            self.ready.set()
+            self.condition.notify_all()
+
+    async def iter_chunks(self):
+        await self.ready.wait()
+        index = 0
+        while True:
+            async with self.condition:
+                while index >= len(self.chunks) and not self.closed:
+                    await self.condition.wait()
+                if index < len(self.chunks):
+                    chunk = self.chunks[index]
+                    index += 1
+                else:
+                    break
+            yield chunk
+
+
+_audio_sessions: dict[str, ResponseAudioSession] = {}
 
 
 def process_rss_mb() -> float:
@@ -155,7 +201,7 @@ async def event_loop_lag_monitor():
             last_report = now
 
 
-def make_streaming_wav_header(sample_rate=24000, bits_per_sample=16, channels=1):
+def make_streaming_wav_header(sample_rate=RESPONSE_SAMPLE_RATE, bits_per_sample=16, channels=1):
     """WAV header with max size placeholder — reader stops at EOF."""
     byte_rate = sample_rate * channels * bits_per_sample // 8
     block_align = channels * bits_per_sample // 8
@@ -166,7 +212,7 @@ def make_streaming_wav_header(sample_rate=24000, bits_per_sample=16, channels=1)
     return header
 
 
-def make_error_tone_pcm(sample_rate=24000) -> bytes:
+def make_error_tone_pcm(sample_rate=RESPONSE_SAMPLE_RATE) -> bytes:
     """Generate a short local fallback tone when Gemini does not answer."""
     chunks = []
     amplitude = 9000
@@ -177,6 +223,111 @@ def make_error_tone_pcm(sample_rate=24000) -> bytes:
             sample = 0 if freq == 0 else int(amplitude * math.sin(2 * math.pi * freq * i / sample_rate))
             chunks.append(struct.pack("<h", sample))
     return b"".join(chunks)
+
+
+def prepare_response_pcm(audio_data: bytes) -> bytes:
+    """Convert Gemini 24 kHz mono PCM16 to the ESP32 48 kHz announcement path."""
+    if len(audio_data) < 2:
+        return b""
+    aligned = audio_data[: (len(audio_data) // 2) * 2]
+    if RESPONSE_SAMPLE_RATE == 24000:
+        return aligned
+    if RESPONSE_SAMPLE_RATE != 48000:
+        return aligned
+    samples = np.frombuffer(aligned, dtype=np.int16)
+    return np.repeat(samples, 2).astype(np.int16).tobytes()
+
+
+def sanitize_capture_type(sample_type: str) -> str:
+    clean = "".join(ch for ch in sample_type.lower() if ch.isalnum() or ch in ("_", "-"))
+    if clean in ("positive", "negative", "noise"):
+        return clean
+    return "unknown"
+
+
+def save_capture_wav(sample_type: str, pcm_chunks: list[bytes]) -> Path:
+    sample_type = sanitize_capture_type(sample_type)
+    output_dir = CAPTURE_DIR / sample_type
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    path = output_dir / f"{sample_type}_{timestamp}_{uuid.uuid4().hex[:8]}.wav"
+    pcm = b"".join(pcm_chunks)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(pcm)
+    return path
+
+
+async def handle_capture_connection(websocket, sample_type: str, first_payload: bytes | None = None):
+    """Save ESP32 capture-only audio without opening a Gemini session."""
+    if not CAPTURE_ENABLED:
+        print("  [capture] Capture request rejected; capture_enabled=false", flush=True)
+        return
+
+    sample_type = sanitize_capture_type(sample_type)
+    chunks: list[bytes] = []
+    total_bytes = 0
+    started = time.monotonic()
+    if first_payload:
+        aligned_len = (len(first_payload) // 2) * 2
+        chunks.append(first_payload[:aligned_len])
+        total_bytes += aligned_len
+
+    reason = "unknown"
+    print(f"  [capture] Started sample_type={sample_type} handler=frame-debug-v2", flush=True)
+    try:
+        message_count = 0
+        while True:
+            elapsed = time.monotonic() - started
+            if elapsed >= CAPTURE_MAX_SECONDS + 2.0:
+                reason = "wall_timeout"
+                break
+
+            raw = await asyncio.wait_for(
+                websocket.recv(), timeout=max(0.2, min(1.0, CAPTURE_MAX_SECONDS + 2.0 - elapsed))
+            )
+            msg_type, data = unpack_message(raw)
+            message_count += 1
+            if message_count <= 20 or message_count % 50 == 0:
+                print(
+                    f"  [capture] msg#{message_count} type={msg_type} len={len(data)} "
+                    f"bytes={total_bytes}",
+                    flush=True,
+                )
+            if msg_type == MSG_AUDIO_END:
+                reason = "audio_end"
+                break
+            if msg_type != MSG_AUDIO_IN:
+                continue
+            aligned_len = (len(data) // 2) * 2
+            if aligned_len > 0:
+                chunks.append(data[:aligned_len])
+                total_bytes += aligned_len
+                if total_bytes >= int(16000 * 2 * CAPTURE_MAX_SECONDS):
+                    reason = "max_audio"
+                    break
+    except asyncio.TimeoutError:
+        reason = "timeout"
+    except websockets.exceptions.ConnectionClosed:
+        reason = "connection_closed"
+    finally:
+        duration = total_bytes / 32000 if total_bytes else 0.0
+        elapsed = time.monotonic() - started
+        if chunks:
+            path = save_capture_wav(sample_type, chunks)
+            print(
+                f"  [capture] Saved {path} reason={reason} chunks={len(chunks)} "
+                f"bytes={total_bytes} audio={duration:.2f}s elapsed={elapsed:.2f}s",
+                flush=True,
+            )
+        else:
+            print(
+                f"  [capture] No audio saved reason={reason} chunks=0 "
+                f"bytes=0 elapsed={elapsed:.2f}s",
+                flush=True,
+            )
 
 
 async def handle_function_call(name: str, args: dict, room_lights: dict,
@@ -221,22 +372,36 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
     client = genai.Client(api_key=API_KEY)
 
     first_chunk_sent = False
-    audio_queue: asyncio.Queue | None = None
-    audio_ready: asyncio.Event | None = None
+    audio_session: ResponseAudioSession | None = None
     audio_path = ""
+    response_audio_bytes = 0
+
+    async def announce_response_start(force: bool = False):
+        nonlocal first_chunk_sent
+        if first_chunk_sent:
+            return
+        if not force and response_audio_bytes < RESPONSE_PREBUFFER_BYTES:
+            return
+        first_chunk_sent = True
+        if audio_session is not None:
+            audio_session.ready.set()
+        await websocket.send(pack_message(MSG_RESPONSE_START, audio_path.encode()))
+        debug_log(
+            f"  [stream] MSG_RESPONSE_START sent for {audio_path} "
+            f"(prebuffer={response_audio_bytes}B, target={RESPONSE_PREBUFFER_BYTES}B)"
+        )
 
     async def send_audio_to_esp32(audio_data: bytes):
-        """Stream audio chunk to ESP32 via HTTP queue."""
-        nonlocal first_chunk_sent
+        """Stream response audio to the replayable HTTP session."""
+        nonlocal response_audio_bytes
         try:
-            if audio_queue is not None:
-                await audio_queue.put(audio_data)
-            if not first_chunk_sent:
-                first_chunk_sent = True
-                if audio_ready is not None:
-                    audio_ready.set()
-                await websocket.send(pack_message(MSG_RESPONSE_START, audio_path.encode()))
-                debug_log(f"  [stream] MSG_RESPONSE_START sent for {audio_path}")
+            pcm = prepare_response_pcm(audio_data)
+            if not pcm:
+                return
+            if audio_session is not None:
+                await audio_session.append(pcm)
+            response_audio_bytes += len(pcm)
+            await announce_response_start()
         except Exception as e:
             print(f"  [stream] Send error: {e}", flush=True)
 
@@ -269,6 +434,10 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             msg_type, data = unpack_message(raw)
 
             if msg_type != MSG_AUDIO_IN:
+                if msg_type == MSG_CAPTURE_START:
+                    sample_type = data.decode("utf-8", errors="replace").strip() or "unknown"
+                    await handle_capture_connection(websocket, sample_type)
+                    continue
                 continue
 
             t0 = time.monotonic()
@@ -277,11 +446,11 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
 
             # Create streaming queue for this session
             session_id = uuid.uuid4().hex
-            audio_queue = asyncio.Queue()
-            audio_ready = asyncio.Event()
+            audio_session = ResponseAudioSession()
             audio_path = f"/response/{session_id}.wav"
-            _audio_sessions[session_id] = (audio_queue, audio_ready)
+            _audio_sessions[session_id] = audio_session
             first_chunk_sent = False
+            response_audio_bytes = 0
 
             # Real-time streaming: read ESP32 chunks continuously into a small
             # queue, then feed Gemini from that queue. Keeping websocket reads
@@ -559,8 +728,13 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             )
 
             # Signal end of audio stream
-            if first_chunk_sent and audio_queue is not None:
-                await audio_queue.put(None)  # EOF sentinel
+            if response_audio_bytes > 0:
+                try:
+                    await announce_response_start(force=True)
+                except websockets.exceptions.ConnectionClosed:
+                    pass
+            if audio_session is not None:
+                await audio_session.close()
 
             # Signal session end (LED cleanup) + drain stale data
             try:
@@ -712,10 +886,9 @@ async def run_audio_http_server():
         session = _audio_sessions.get(session_id)
         if session is None:
             return web.Response(status=404, text="No active session")
-        audio_queue, audio_ready = session
 
         try:
-            await asyncio.wait_for(audio_ready.wait(), timeout=15.0)
+            await asyncio.wait_for(session.ready.wait(), timeout=15.0)
         except asyncio.TimeoutError:
             return web.Response(status=504, text="Timeout waiting for audio")
 
@@ -727,17 +900,12 @@ async def run_audio_http_server():
         await resp.write(make_streaming_wav_header())
 
         bytes_sent = 0
-        while True:
-            try:
-                chunk = await asyncio.wait_for(audio_queue.get(), timeout=30.0)
-            except asyncio.TimeoutError:
-                break
-            if chunk is None:
-                break
+        async for chunk in session.iter_chunks():
             await resp.write(chunk)
             bytes_sent += len(chunk)
 
-        debug_log(f"  [http] Streamed {bytes_sent}B ({bytes_sent/48000:.1f}s audio)")
+        audio_seconds = bytes_sent / (RESPONSE_SAMPLE_RATE * RESPONSE_SAMPLE_WIDTH)
+        debug_log(f"  [http] Streamed {bytes_sent}B ({audio_seconds:.1f}s audio)")
         await resp.write_eof()
         return resp
 
@@ -754,6 +922,7 @@ async def run_audio_http_server():
 async def main():
     print("=" * 50)
     print("Gemini Live Proxy v2")
+    print("Capture handler build: frame-debug-v2")
     print("=" * 50)
 
     # Load entities from HA

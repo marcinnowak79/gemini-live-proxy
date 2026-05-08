@@ -1,5 +1,9 @@
 .env
 venv/
+.venv/
+.ha_storage/
+captures/
+captures_normalized/
 __pycache__/
 *.py[cod]
 .DS_Store
