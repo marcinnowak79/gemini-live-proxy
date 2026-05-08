@@ -8,8 +8,9 @@ The add-on runs two local services:
 - HTTP server on `8766/tcp` for response audio streamed back to the ESP32 media player.
 
 The Home Assistant add-on UI includes English help text for every configuration
-option. Hover or open the help icon next to an option to see what it controls,
-how it affects runtime behavior, and typical values.
+option. The same English text is available for both English and Polish Home
+Assistant UI locales. Hover or open the help icon next to an option to see what
+it controls, how it affects runtime behavior, and typical values.
 
 ## Requirements
 

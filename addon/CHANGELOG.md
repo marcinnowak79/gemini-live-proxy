@@ -2,6 +2,11 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.0.20
+
+- Added English UI help text under the Polish locale so Home Assistant installations using Polish can display the same option descriptions.
+- Changed network port translations to the Home Assistant documented string format.
+
 ## 1.0.19
 
 - Added English Home Assistant add-on UI help text for every configuration option and exposed network port.
