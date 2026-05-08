@@ -2,12 +2,20 @@
 
 ## Home Assistant add-on deploy
 
-Home Assistant host: `192.168.8.209`
+Set the Home Assistant connection details in your shell before running the
+commands below:
+
+```bash
+export HA_HOST=<home-assistant-ip-or-hostname>
+export HA_SSH_PORT=2222
+export HA_SSH_KEY=~/.ssh/homeassistant
+export HA_SSH_USER=root
+```
 
 SSH:
 
 ```bash
-ssh -p 2222 -i ~/.ssh/homeassistant root@192.168.8.209
+ssh -p "$HA_SSH_PORT" -i "$HA_SSH_KEY" "$HA_SSH_USER@$HA_HOST"
 ```
 
 The add-on is installed as:
@@ -56,7 +64,6 @@ image: "ghcr.io/marcinnowak79/gemini-live-proxy-{arch}"
 Release flow:
 
 ```bash
-cd /Users/mnowak/AI_assistant/dom/gemini-live-proxy
 ruby -e 'require "yaml"; %w[.github/workflows/docker-build.yml repository.yaml addon/config.yaml].each { |p| YAML.load_file(p); puts "OK #{p}" }'
 docker build --platform linux/arm64 --build-arg BUILD_VERSION=<version> --build-arg BUILD_ARCH=aarch64 -t ghcr.io/marcinnowak79/gemini-live-proxy-aarch64:<version> addon
 git add .github/workflows/docker-build.yml addon/Dockerfile addon/config.yaml
@@ -68,19 +75,19 @@ git push origin main v<version>
 After GitHub Actions publishes the image:
 
 ```bash
-rsync -av --exclude __pycache__ -e 'ssh -p 2222 -i ~/.ssh/homeassistant -o BatchMode=yes' addon/ root@192.168.8.209:/addons/local/gemini-live-proxy/
-ssh -p 2222 -i ~/.ssh/homeassistant root@192.168.8.209 'ha store reload'
-ssh -p 2222 -i ~/.ssh/homeassistant root@192.168.8.209 'ha apps update local_gemini_live_proxy'
-ssh -p 2222 -i ~/.ssh/homeassistant root@192.168.8.209 'ha apps start local_gemini_live_proxy'
+rsync -av --exclude __pycache__ -e "ssh -p $HA_SSH_PORT -i $HA_SSH_KEY -o BatchMode=yes" addon/ "$HA_SSH_USER@$HA_HOST:/addons/local/gemini-live-proxy/"
+ssh -p "$HA_SSH_PORT" -i "$HA_SSH_KEY" "$HA_SSH_USER@$HA_HOST" 'ha store reload'
+ssh -p "$HA_SSH_PORT" -i "$HA_SSH_KEY" "$HA_SSH_USER@$HA_HOST" 'ha apps update local_gemini_live_proxy'
+ssh -p "$HA_SSH_PORT" -i "$HA_SSH_KEY" "$HA_SSH_USER@$HA_HOST" 'ha apps start local_gemini_live_proxy'
 ```
 
 Verify:
 
 ```bash
-nc -vz 192.168.8.209 8765
-nc -vz 192.168.8.209 8766
-ssh -p 2222 -i ~/.ssh/homeassistant root@192.168.8.209 'ha apps info local_gemini_live_proxy | grep -E "^(build|state|version|version_latest):"'
-ssh -p 2222 -i ~/.ssh/homeassistant root@192.168.8.209 'ha apps logs local_gemini_live_proxy | tail -n 80'
+nc -vz "$HA_HOST" 8765
+nc -vz "$HA_HOST" 8766
+ssh -p "$HA_SSH_PORT" -i "$HA_SSH_KEY" "$HA_SSH_USER@$HA_HOST" 'ha apps info local_gemini_live_proxy | grep -E "^(build|state|version|version_latest):"'
+ssh -p "$HA_SSH_PORT" -i "$HA_SSH_KEY" "$HA_SSH_USER@$HA_HOST" 'ha apps logs local_gemini_live_proxy | tail -n 80'
 ```
 
 Expected healthy state:
@@ -95,6 +102,6 @@ version_latest: <current>
 Ports:
 
 ```text
-ws://192.168.8.209:8765
-http://192.168.8.209:8766/response/<session>.wav
+ws://<home-assistant-host>:8765
+http://<home-assistant-host>:8766/response/<session>.wav
 ```
