@@ -1,5 +1,12 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/base:latest
-FROM ${BUILD_FROM}
+FROM ghcr.io/home-assistant/base:latest
+
+ARG BUILD_VERSION=dev
+ARG BUILD_ARCH=aarch64
+
+LABEL \
+  io.hass.version="${BUILD_VERSION}" \
+  io.hass.type="app" \
+  io.hass.arch="${BUILD_ARCH}"
 
 RUN apk add --no-cache python3 py3-pip py3-numpy
 
