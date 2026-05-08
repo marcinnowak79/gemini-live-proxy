@@ -2,6 +2,10 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.0.19
+
+- Added English Home Assistant add-on UI help text for every configuration option and exposed network port.
+
 ## 1.0.12
 
 - Added on-demand Home Assistant state tools for individual devices and room light/switch groups.

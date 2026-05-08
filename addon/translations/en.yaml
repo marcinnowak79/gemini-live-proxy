@@ -1,0 +1,71 @@
+configuration:
+  gemini_api_key:
+    name: Gemini API key
+    description: Google Gemini key used to connect to Gemini Live. The proxy cannot start a Gemini session without it. Use a key from Google AI Studio or Vertex/Google Cloud, depending on your setup.
+  gemini_model:
+    name: Gemini Live model
+    description: Name of the realtime/live model used for the conversation. Change only to another compatible Gemini Live model; an invalid name will make Gemini session startup fail.
+  gemini_voice:
+    name: Gemini voice
+    description: Voice name used by Gemini Live. This affects voice character and delivery, not wake word detection. Restart the add-on after changing it.
+  assistant_name:
+    name: Assistant name
+    description: Assistant persona name appended to the prompt. Used for self-reference and grammar instructions.
+  assistant_gender:
+    name: Assistant grammatical gender
+    description: Controls how the assistant refers to itself. For Polish, use "male" for forms like "zrobiłem" and "jestem gotowy"; "female" for feminine forms; "neutral" to avoid gendered self-reference.
+  assistant_speaking_style:
+    name: Speaking style
+    description: Short tone and pacing instruction appended to the prompt. Use it for guidance such as calm, brief, untheatrical, lightly dry. Very long style prompts can reduce command-following reliability.
+  assistant_language:
+    name: Assistant input language
+    description: BCP-47 language code for speech configuration, for example "pl-PL" or "en-US". Use "pl-PL" for a Polish-speaking home.
+  assistant_response_language:
+    name: Response language
+    description: Phrase inserted into the prompt as the answer language, for example "polsku" or "English". This tells the model what language to answer in.
+  system_prompt_template:
+    name: System prompt template
+    description: Main Gemini instruction. Keep {entities} and {context} if the model should know available devices and current time/location. Usually edit persona/style fields instead of replacing the whole prompt.
+  room_aliases_json:
+    name: Room aliases JSON
+    description: Optional JSON map from aliases to room names, for example {"bedroom":"sypialnia"}. Helps when entities lack proper area_id metadata or users use short room names.
+  vacuum_entity_id:
+    name: Vacuum entity
+    description: Home Assistant entity ID for the vacuum, for example "vacuum.rockrobo". Leave empty if you do not want vacuum control tools.
+  ha_exposed_only:
+    name: Only Assist-exposed entities
+    description: When enabled, Gemini sees only entities exposed to Home Assistant Assist. This is recommended because it shrinks the prompt and avoids exposing private or technical entities.
+  debug_logging:
+    name: Debug logging
+    description: Enables detailed proxy, timing and audio-stream logs. Useful for diagnosis; leave disabled day to day because logs become large and noisy.
+  capture_enabled:
+    name: Sample capture mode
+    description: Allows firmware to send short recordings into capture_dir without opening a Gemini session. Used for collecting wake word samples; can be disabled for normal operation.
+  capture_dir:
+    name: Capture directory
+    description: Home Assistant path where capture samples are saved. Defaults to /config/gemini-live-proxy/captures with subdirectories such as positive, negative and noise.
+  capture_max_seconds:
+    name: Max sample duration
+    description: Maximum length of one capture recording in seconds. Usually 2-3 seconds is enough for a wake word; higher values create larger files.
+  timer_media_player_entity_id:
+    name: Timer media player
+    description: Entity ID of the player used for timer alarms/media, for example media_player.home_assistant_voice_0a32f9_media_player. If empty, timer audio actions may not work.
+  timer_default_media_url:
+    name: Timer alarm media URL
+    description: URL of the audio file played when a timer finishes, for example http://homeassistant.local:8123/local/gemini_timer_alarm.wav. It must be reachable by Home Assistant/media_player.
+  timer_default_media_content_type:
+    name: Timer media content type
+    description: Content type passed to media_player.play_media for timer alarms. "music" usually works for WAV/MP3 files.
+  timer_default_script_id:
+    name: Default timer script
+    description: Optional script ID used by timer actions when the user asks to run a script after a delay. Leave empty if unused.
+  timer_alarm_repeat_interval_seconds:
+    name: Alarm repeat interval
+    description: How often, in seconds, the timer alarm repeats until the user stops it. Lower values are more insistent; higher values are less intrusive.
+network:
+  8765/tcp:
+    name: ESP32 WebSocket
+    description: Main channel between Voice PE and the proxy. Firmware should point to ws://home-assistant:8765; microphone audio and control messages use this port.
+  8766/tcp:
+    name: Response audio HTTP
+    description: WAV/HTTP server used by the ESP32 media player to play Gemini responses. The proxy sends /response/<session>.wav over WebSocket and the device downloads audio from this port.

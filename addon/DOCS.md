@@ -7,6 +7,10 @@ The add-on runs two local services:
 - WebSocket server on `8765/tcp` for microphone audio and control messages from the ESP32.
 - HTTP server on `8766/tcp` for response audio streamed back to the ESP32 media player.
 
+The Home Assistant add-on UI includes English help text for every configuration
+option. Hover or open the help icon next to an option to see what it controls,
+how it affects runtime behavior, and typical values.
+
 ## Requirements
 
 - Home Assistant OS or Home Assistant Supervised with Supervisor add-ons enabled.

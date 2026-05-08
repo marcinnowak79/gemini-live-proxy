@@ -1,6 +1,6 @@
 name: "Gemini Live Proxy"
 slug: gemini_live_proxy
-version: "1.0.18"
+version: "1.0.19"
 description: "WebSocket proxy between ESP32 Voice PE and Gemini Live API"
 image: "ghcr.io/marcinnowak79/gemini-live-proxy-{arch}"
 arch:
