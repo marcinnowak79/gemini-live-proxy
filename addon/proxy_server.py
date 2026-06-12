@@ -19,6 +19,7 @@ import struct
 import sys
 import time
 import uuid
+import wave
 
 import numpy as np
 import websockets
@@ -41,15 +42,19 @@ MIC_RMS_MIN_SPEECH = float(os.getenv("MIC_RMS_MIN_SPEECH", "650"))
 MIC_RMS_SPEECH_RATIO = float(os.getenv("MIC_RMS_SPEECH_RATIO", "3.0"))
 MIC_RMS_NOISE_ALPHA = float(os.getenv("MIC_RMS_NOISE_ALPHA", "0.08"))
 MIC_RMS_INITIAL_NOISE = float(os.getenv("MIC_RMS_INITIAL_NOISE", "120"))
-MIC_SILENCE_TIMEOUT_MS = int(os.getenv("MIC_SILENCE_TIMEOUT_MS", "2400"))
+MIC_SILENCE_TIMEOUT_MS = int(os.getenv("MIC_SILENCE_TIMEOUT_MS", "3500"))
 MIC_NO_SPEECH_TIMEOUT_MS = int(os.getenv("MIC_NO_SPEECH_TIMEOUT_MS", "3500"))
-MIC_MAX_STREAM_MS = int(os.getenv("MIC_MAX_STREAM_MS", "7000"))
-SESSION_TIMEOUT_SECONDS = float(os.getenv("SESSION_TIMEOUT_SECONDS", "16"))
+MIC_MAX_STREAM_MS = int(os.getenv("MIC_MAX_STREAM_MS", "8000"))
+SESSION_TIMEOUT_SECONDS = float(os.getenv("SESSION_TIMEOUT_SECONDS", "30"))
 GEMINI_RETRY_TIMEOUT_SECONDS = float(os.getenv("GEMINI_RETRY_TIMEOUT_SECONDS", "10"))
-GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "1"))
+GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "0"))
 DIAG_EVENT_LOOP_LAG_WARN_MS = float(os.getenv("DIAG_EVENT_LOOP_LAG_WARN_MS", "250"))
 DIAG_EVENT_LOOP_INTERVAL_SECONDS = float(os.getenv("DIAG_EVENT_LOOP_INTERVAL_SECONDS", "0.25"))
 DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").lower() in ("1", "true", "yes", "on")
+SAVE_INPUT_AUDIO = os.getenv("SAVE_INPUT_AUDIO", "false").lower() in ("1", "true", "yes", "on")
+INPUT_AUDIO_DIR = os.getenv("INPUT_AUDIO_DIR", "/share/gemini_in")
+INPUT_AUDIO_KEEP = int(os.getenv("INPUT_AUDIO_KEEP", "100000"))
+INPUT_AUDIO_SAMPLE_RATE = 16000
 RESPONSE_SAMPLE_RATE = 48000
 RESPONSE_SAMPLE_WIDTH = 2
 RESPONSE_PREBUFFER_MS = int(os.getenv("RESPONSE_PREBUFFER_MS", "700"))
@@ -59,6 +64,42 @@ RESPONSE_PREBUFFER_BYTES = int(RESPONSE_SAMPLE_RATE * RESPONSE_SAMPLE_WIDTH * RE
 def debug_log(message: str):
     if DEBUG_LOGGING:
         print(message, flush=True)
+
+
+def save_input_audio(pcm_chunks: list) -> None:
+    """Debug: dump the buffered post-wake-word mic audio to a 16kHz mono WAV.
+
+    Used to catch what triggers the wake word (e.g. false activations from a
+    TV/film). Keeps only the most recent INPUT_AUDIO_KEEP files.
+    """
+    if not pcm_chunks:
+        return
+    try:
+        raw = b"".join(pcm_chunks)
+        samples = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
+        peak = int(np.abs(samples).max()) if samples.size else 0
+        rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2))) if samples.size else 0.0
+        os.makedirs(INPUT_AUDIO_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        name = f"in_{stamp}_peak{int(peak)}_rms{int(rms)}.wav"
+        path = os.path.join(INPUT_AUDIO_DIR, name)
+        with wave.open(path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(INPUT_AUDIO_SAMPLE_RATE)
+            w.writeframes(raw)
+        print(f"  [stream] Saved input audio -> {path}", flush=True)
+        # ring cleanup: keep newest INPUT_AUDIO_KEEP
+        files = sorted(
+            (f for f in os.listdir(INPUT_AUDIO_DIR) if f.startswith("in_") and f.endswith(".wav"))
+        )
+        for stale in files[:-INPUT_AUDIO_KEEP]:
+            try:
+                os.remove(os.path.join(INPUT_AUDIO_DIR, stale))
+            except OSError:
+                pass
+    except Exception as exc:  # never let debug-save break a session
+        print(f"  [stream] save_input_audio failed: {exc}", flush=True)
 
 # Conversation history (shared across sessions, 5 min timeout)
 CONTEXT_TIMEOUT = 300
@@ -626,6 +667,9 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 f"result: {summary[:80] if summary else 'none'}"
             )
 
+            if SAVE_INPUT_AUDIO:
+                save_input_audio(buffered_pcm_chunks)
+
             # Signal end of audio stream
             if response_audio_bytes > 0:
                 try:
@@ -821,7 +865,6 @@ async def run_audio_http_server():
 async def main():
     print("=" * 50)
     print("Gemini Live Proxy v2")
-    print("Capture handler build: frame-debug-v2")
     print("=" * 50)
 
     # Load entities from HA

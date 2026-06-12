@@ -24,7 +24,7 @@ ASSISTANT_RESPONSE_LANGUAGE = os.getenv("ASSISTANT_RESPONSE_LANGUAGE", "English"
 RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION = float(os.getenv("RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION", "1.5"))
 RECEIVE_IDLE_TIMEOUT_AFTER_AUDIO = float(os.getenv("RECEIVE_IDLE_TIMEOUT_AFTER_AUDIO", "1.2"))
 RECEIVE_IDLE_TIMEOUT_GENERAL = float(os.getenv("RECEIVE_IDLE_TIMEOUT_GENERAL", "8.0"))
-GEMINI_SILENCE_DURATION_MS = int(os.getenv("GEMINI_SILENCE_DURATION_MS", "1100"))
+GEMINI_SILENCE_DURATION_MS = int(os.getenv("GEMINI_SILENCE_DURATION_MS", "3000"))
 DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").lower() in ("1", "true", "yes", "on")
 
 
@@ -306,6 +306,8 @@ class GeminiSession:
             ),
             system_instruction=types.Content(parts=[types.Part(text=prompt)]),
             tools=build_tools(room_keys, self.vacuum_enabled),
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
@@ -322,6 +324,8 @@ class GeminiSession:
 
         async with self.client.aio.live.connect(model=GEMINI_MODEL, config=config) as session:
             response_audio_chunks = []
+            input_transcript_parts = []
+            output_transcript_parts = []
             send_done = False
 
             # Task 1: Send audio to Gemini (runs until source stops)
@@ -368,8 +372,24 @@ class GeminiSession:
                         except StopAsyncIteration:
                             break
 
+                        msg_fields = [
+                            n for n in (
+                                "setup_complete", "server_content", "tool_call",
+                                "tool_call_cancellation", "usage_metadata",
+                                "go_away", "session_resumption_update",
+                            ) if getattr(message, n, None) is not None
+                        ]
+                        debug_log(
+                            f"  [gemini] msg fields={msg_fields} "
+                            f"({(time.monotonic()-t0)*1000:.0f}ms, responding={responding_signaled})"
+                        )
+
                         sc = message.server_content
                         if sc:
+                            if sc.input_transcription and sc.input_transcription.text:
+                                input_transcript_parts.append(sc.input_transcription.text)
+                            if sc.output_transcription and sc.output_transcription.text:
+                                output_transcript_parts.append(sc.output_transcription.text)
                             if sc.model_turn:
                                 # Signal that Gemini started responding (stop mic streaming)
                                 if not responding_signaled:
@@ -428,6 +448,11 @@ class GeminiSession:
 
             response_text = "".join(response_text_parts)
             function_calls_made = " ".join(function_calls_list)
+
+            heard = "".join(input_transcript_parts).strip()
+            said = "".join(output_transcript_parts).strip()
+            print(f"  [gemini] HEARD (user): {heard!r}", flush=True)
+            print(f"  [gemini] SAID (model): {said!r}", flush=True)
 
         total_ms = (time.monotonic() - t0) * 1000
         debug_log(f"  [gemini] TOTAL: {total_ms:.0f}ms")

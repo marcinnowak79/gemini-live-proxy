@@ -1,6 +1,6 @@
 name: "Gemini Live Proxy"
 slug: gemini_live_proxy
-version: "1.0.22"
+version: "1.0.25"
 description: "WebSocket proxy between ESP32 Voice PE and Gemini Live API"
 image: "ghcr.io/marcinnowak79/gemini-live-proxy-{arch}"
 arch:
@@ -11,6 +11,7 @@ homeassistant_api: true
 realtime: true
 map:
   - config:ro
+  - share:rw
 ports:
   8765/tcp: 8765
   8766/tcp: 8766
@@ -59,7 +60,10 @@ options:
   vacuum_entity_id: ""
   ha_exposed_only: true
   debug_logging: false
+  save_input_audio: false
   response_prebuffer_ms: 700
+  session_timeout_seconds: 30
+  gemini_max_retries: 0
   timer_media_player_entity_id: ""
   timer_default_media_url: ""
   timer_default_media_content_type: "music"
@@ -79,7 +83,10 @@ schema:
   vacuum_entity_id: str?
   ha_exposed_only: bool?
   debug_logging: bool?
+  save_input_audio: bool?
   response_prebuffer_ms: int?
+  session_timeout_seconds: float?
+  gemini_max_retries: int?
   timer_media_player_entity_id: str?
   timer_default_media_url: str?
   timer_default_media_content_type: str?

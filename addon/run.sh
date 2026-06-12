@@ -23,8 +23,19 @@ case "${DEBUG_LOGGING_CONFIG,,}" in
         export DEBUG_LOGGING="false"
         ;;
 esac
+SAVE_INPUT_AUDIO_CONFIG=$(bashio::config 'save_input_audio')
+case "${SAVE_INPUT_AUDIO_CONFIG,,}" in
+    "1"|"true"|"yes"|"on")
+        export SAVE_INPUT_AUDIO="true"
+        ;;
+    *)
+        export SAVE_INPUT_AUDIO="false"
+        ;;
+esac
 export TIMER_MEDIA_PLAYER_ENTITY_ID=$(bashio::config 'timer_media_player_entity_id')
 export RESPONSE_PREBUFFER_MS=$(bashio::config 'response_prebuffer_ms')
+export SESSION_TIMEOUT_SECONDS=$(bashio::config 'session_timeout_seconds')
+export GEMINI_MAX_RETRIES=$(bashio::config 'gemini_max_retries')
 export TIMER_DEFAULT_MEDIA_URL=$(bashio::config 'timer_default_media_url')
 export TIMER_DEFAULT_MEDIA_CONTENT_TYPE=$(bashio::config 'timer_default_media_content_type')
 export TIMER_DEFAULT_SCRIPT_ID=$(bashio::config 'timer_default_script_id')

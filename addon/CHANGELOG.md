@@ -2,6 +2,21 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.0.25
+
+- Added input/output audio transcription logging (`HEARD`/`SAID`) to diagnose why a spoken command did or did not trigger an action.
+- Lengthened the silence windows so users who wait for the wake confirmation sound before speaking are not cut off: Gemini end-of-turn silence 1100 -> 3000 ms, local mic VAD silence 2400 -> 3500 ms, max stream 7000 -> 8000 ms.
+
+## 1.0.24
+
+- Added `save_input_audio` option: persist incoming wake-word audio to `/share/gemini_in/` (with `share:rw` mount) for false-trigger and command debugging.
+
+## 1.0.23
+
+- Increased the default Gemini session timeout for slower web/search answers.
+- Disabled timeout retries by default so a stalled web/search request fails once instead of repeating after the device has already disconnected.
+- Exposed session timeout and retry count as add-on options.
+
 ## 1.0.22
 
 - Increased the default response audio prebuffer and exposed it as an add-on option to reduce playback stutter.

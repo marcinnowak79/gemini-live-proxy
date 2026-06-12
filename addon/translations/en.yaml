@@ -41,6 +41,12 @@ configuration:
   response_prebuffer_ms:
     name: Response prebuffer
     description: How much Gemini response audio to buffer before the ESP32 starts HTTP playback. Higher values add a little latency but reduce stutters and restart-like glitches when Gemini audio arrives unevenly. Try 700-1200 ms if playback cuts out.
+  session_timeout_seconds:
+    name: Session timeout
+    description: Maximum time the proxy waits for Gemini to produce a response before playing the local fallback tone. Higher values help slow web/search questions; lower values fail faster when Gemini stalls.
+  gemini_max_retries:
+    name: Gemini timeout retries
+    description: How many times to retry the same buffered audio after a full Gemini session timeout. Keep 0 for normal use so slow web/search questions do not spend extra time repeating the same request.
   timer_media_player_entity_id:
     name: Timer media player
     description: Entity ID of the player used for timer alarms/media, for example media_player.home_assistant_voice_0a32f9_media_player. If empty, timer audio actions may not work.
