@@ -368,6 +368,18 @@ class GeminiSession:
                         except StopAsyncIteration:
                             break
 
+                        msg_fields = [
+                            n for n in (
+                                "setup_complete", "server_content", "tool_call",
+                                "tool_call_cancellation", "usage_metadata",
+                                "go_away", "session_resumption_update",
+                            ) if getattr(message, n, None) is not None
+                        ]
+                        debug_log(
+                            f"  [gemini] msg fields={msg_fields} "
+                            f"({(time.monotonic()-t0)*1000:.0f}ms, responding={responding_signaled})"
+                        )
+
                         sc = message.server_content
                         if sc:
                             if sc.model_turn:

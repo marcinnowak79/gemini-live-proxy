@@ -44,9 +44,9 @@ MIC_RMS_INITIAL_NOISE = float(os.getenv("MIC_RMS_INITIAL_NOISE", "120"))
 MIC_SILENCE_TIMEOUT_MS = int(os.getenv("MIC_SILENCE_TIMEOUT_MS", "2400"))
 MIC_NO_SPEECH_TIMEOUT_MS = int(os.getenv("MIC_NO_SPEECH_TIMEOUT_MS", "3500"))
 MIC_MAX_STREAM_MS = int(os.getenv("MIC_MAX_STREAM_MS", "7000"))
-SESSION_TIMEOUT_SECONDS = float(os.getenv("SESSION_TIMEOUT_SECONDS", "16"))
+SESSION_TIMEOUT_SECONDS = float(os.getenv("SESSION_TIMEOUT_SECONDS", "30"))
 GEMINI_RETRY_TIMEOUT_SECONDS = float(os.getenv("GEMINI_RETRY_TIMEOUT_SECONDS", "10"))
-GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "1"))
+GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "0"))
 DIAG_EVENT_LOOP_LAG_WARN_MS = float(os.getenv("DIAG_EVENT_LOOP_LAG_WARN_MS", "250"))
 DIAG_EVENT_LOOP_INTERVAL_SECONDS = float(os.getenv("DIAG_EVENT_LOOP_INTERVAL_SECONDS", "0.25"))
 DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").lower() in ("1", "true", "yes", "on")
@@ -821,7 +821,6 @@ async def run_audio_http_server():
 async def main():
     print("=" * 50)
     print("Gemini Live Proxy v2")
-    print("Capture handler build: frame-debug-v2")
     print("=" * 50)
 
     # Load entities from HA
