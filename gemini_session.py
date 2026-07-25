@@ -9,233 +9,45 @@ from typing import AsyncGenerator, Callable, Awaitable
 from google import genai
 from google.genai import types
 
+from ai_common import (  # noqa: F401 - re-exported for callers and tests
+    ASSISTANT_GENDER,
+    ASSISTANT_LANGUAGE,
+    ASSISTANT_NAME,
+    ASSISTANT_RESPONSE_LANGUAGE,
+    ASSISTANT_SPEAKING_STYLE,
+    DEBUG_LOGGING,
+    DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+    FOLLOW_UP_RESOLUTION_PROMPT,
+    INPUT_LANGUAGE_LOCK_PROMPT,
+    SYSTEM_PROMPT_TEMPLATE,
+    build_persona_prompt,
+    build_prompt,
+    build_tool_specs,
+    debug_log,
+    web_search,
+)
+
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-live-preview")
 GEMINI_VOICE = os.getenv("GEMINI_VOICE", "Charon")
-ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Dżefrej")
-ASSISTANT_GENDER = os.getenv("ASSISTANT_GENDER", "male")
-ASSISTANT_SPEAKING_STYLE = os.getenv(
-    "ASSISTANT_SPEAKING_STYLE",
-    "Steady, efficient, and unhurried. Tone is empathetic, crisp, reassuring, "
-    "and lightly dry/sarcastic when appropriate. Avoid exaggerated enthusiasm, "
-    "theatrical delivery, and long explanations.",
-)
-ASSISTANT_LANGUAGE = os.getenv("ASSISTANT_LANGUAGE", "en-US")
-ASSISTANT_RESPONSE_LANGUAGE = os.getenv("ASSISTANT_RESPONSE_LANGUAGE", "English")
 RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION = float(os.getenv("RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION", "1.5"))
 RECEIVE_IDLE_TIMEOUT_AFTER_AUDIO = float(os.getenv("RECEIVE_IDLE_TIMEOUT_AFTER_AUDIO", "1.2"))
 RECEIVE_IDLE_TIMEOUT_GENERAL = float(os.getenv("RECEIVE_IDLE_TIMEOUT_GENERAL", "8.0"))
 GEMINI_SILENCE_DURATION_MS = int(os.getenv("GEMINI_SILENCE_DURATION_MS", "1100"))
-DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").lower() in ("1", "true", "yes", "on")
 
-
-def debug_log(message: str):
-    if DEBUG_LOGGING:
-        print(message, flush=True)
-
-DEFAULT_SYSTEM_PROMPT_TEMPLATE = """You are a smart home assistant. Always speak in {response_language}. You must answer only in {response_language}.
-
-Rules:
-- Answer very briefly, preferably in one sentence.
-- Always use tools for smart home control. Never say "done" without calling the appropriate tool.
-- If the user does not name a room or location, prefer devices marked local=true.
-- If several devices have similar names, choose the local=true device unless the user explicitly names another room/person/location.
-- Only choose non-local devices when the user explicitly refers to their room, person, or unique device name.
-- For follow-up commands with pronouns such as it, this, that, go, ją, je, to, tego, tamto, teraz, use RECENT SMART HOME ACTIONS to infer the target.
-- If the user says "turn it off", "zgaś go", "wyłącz ją", or similar after turning something on, call the same target with action=turn_off.
-- When the user asks for room lights, use control_room.
-- When the user asks for a specific device, use control_device.
-- When the user asks whether a device is on/off or asks for a current device value, call get_device_state.
-- When the user asks what is on/off in a room, call get_room_state.
-- Timers: for countdown requests, call set_timer. Use list_timers to answer timer status questions. Use cancel_timer to cancel timers.
-- When a timer alarm is ringing and the user says "stop", "enough", "wystarczy", "stop timer", or similar, call stop_timer_alarm.
-- For requests like "play music after X minutes", call set_timer with action=play_media.
-- For requests like "run a scene/script after X minutes", call set_timer with action=run_script when a script is available.
-- Climate: for heating, cooling, AC or temperature changes, call set_climate.
-- Time and date: use the current context below. Do not call search_web for time/date.
-- Questions about current information, weather or news: call search_web, then answer with the result.
-- activate_scene only when the user explicitly asks for a scene by name.
-
-Note: many smart home lights may be exposed as switch entities rather than light entities.
-
-=== AVAILABLE DEVICES ===
-{entities}
-{context}
-"""
-
-SYSTEM_PROMPT_TEMPLATE = os.getenv("SYSTEM_PROMPT_TEMPLATE", DEFAULT_SYSTEM_PROMPT_TEMPLATE)
-
-def build_persona_prompt() -> str:
-    name = ASSISTANT_NAME.strip() or "Dżefrej"
-    gender = ASSISTANT_GENDER.strip().lower()
-    style = ASSISTANT_SPEAKING_STYLE.strip()
-
-    if gender == "male":
-        gender_instruction = (
-            f"Your name is {name}. You are male. If you refer to yourself, always use masculine "
-            "grammatical forms. In Polish, never describe yourself with feminine forms such as "
-            '"zrobiłam", "jestem gotowa", "odpowiedziałam". Use masculine forms such as '
-            '"zrobiłem", "jestem gotowy", "odpowiedziałem".'
-        )
-    elif gender == "female":
-        gender_instruction = (
-            f"Your name is {name}. You are female. If you refer to yourself, use feminine "
-            "grammatical forms where the response language requires gender."
-        )
-    else:
-        gender_instruction = (
-            f"Your name is {name}. Avoid unnecessarily gendered self-references unless the "
-            "user explicitly asks about your persona."
-        )
-
-    prompt = "\n=== ASSISTANT PERSONA AND SPEAKING STYLE ===\n"
-    prompt += gender_instruction + "\n"
-    if style:
-        prompt += f"Speaking style: {style}\n"
-    prompt += "=== END ASSISTANT PERSONA AND SPEAKING STYLE ===\n"
-    return prompt
-
-FOLLOW_UP_RESOLUTION_PROMPT = """
-=== FOLLOW-UP TARGET RESOLUTION ===
-Use RECENT SMART HOME ACTIONS to resolve short follow-up commands that refer to a previous target.
-This is especially important for pronouns and ellipsis such as it, this, that, go, ją, je, to, tego, tamto, teraz.
-If the user says "turn it off", "zgaś go", "wyłącz ją", "a teraz zgaś", or similar after a successful turn_on action, call the same entity with action=turn_off.
-If the user says a follow-up command without naming a room or device, prefer the most recent matching entity or room from RECENT SMART HOME ACTIONS.
-=== END FOLLOW-UP TARGET RESOLUTION ===
-"""
 
 
 def build_tools(room_keys: list[str], vacuum_enabled: bool = False) -> list:
+    """Adapt the shared tool catalogue to Gemini's FunctionDeclaration type."""
     declarations = [
         types.FunctionDeclaration(
-            name="control_device",
-            description="Turn on/off/toggle a single HA entity.",
-            parameters={"type": "object", "properties": {
-                "entity_id": {"type": "string"},
-                "action": {"type": "string", "enum": ["turn_on", "turn_off", "toggle"]},
-            }, "required": ["entity_id", "action"]},
-        ),
-        types.FunctionDeclaration(
-            name="control_room",
-            description="Turn on/off ALL lights in a room at once.",
-            parameters={"type": "object", "properties": {
-                "room": {"type": "string", "enum": room_keys if room_keys else ["default"]},
-                "action": {"type": "string", "enum": ["turn_on", "turn_off"]},
-            }, "required": ["room", "action"]},
-        ),
-        types.FunctionDeclaration(
-            name="get_device_state",
-            description=(
-                "Get the current Home Assistant state of one entity on demand. "
-                "Use for questions asking whether a device is on/off or asking for current values "
-                "such as temperature, battery, media state, or availability."
-            ),
-            parameters={"type": "object", "properties": {
-                "entity_id": {"type": "string"},
-            }, "required": ["entity_id"]},
-        ),
-        types.FunctionDeclaration(
-            name="get_printer_status",
-            description=(
-                "Get current Prusa Core One printer status in one call. "
-                "Use when the user asks about printer state, print progress, nozzle or hotend "
-                "temperature, what is printing, or when the print is expected to finish."
-            ),
-            parameters={"type": "object", "properties": {}},
-        ),
-        types.FunctionDeclaration(
-            name="get_room_state",
-            description=(
-                "Get current states for all light/switch entities in a room on demand. "
-                "Use for questions like whether lights are on in a room or what is still on."
-            ),
-            parameters={"type": "object", "properties": {
-                "room": {"type": "string", "enum": room_keys if room_keys else ["default"]},
-            }, "required": ["room"]},
-        ),
-        types.FunctionDeclaration(
-            name="activate_scene",
-            description="Activate a scene. Only when user explicitly asks by name.",
-            parameters={"type": "object", "properties": {
-                "scene_id": {"type": "string"},
-            }, "required": ["scene_id"]},
-        ),
-        types.FunctionDeclaration(
-            name="run_script",
-            description="Run a HA script",
-            parameters={"type": "object", "properties": {
-                "script_id": {"type": "string"},
-            }, "required": ["script_id"]},
-        ),
-        types.FunctionDeclaration(
-            name="set_timer",
-            description=(
-                "Set countdown timer. Convert to seconds: 1 minuta=60, 30 sekund=30. "
-                "Use action=notify for a normal timer, action=play_media to play configured music/media after the timer, "
-                "or action=run_script to run a configured Home Assistant script after the timer."
-            ),
-            parameters={"type": "object", "properties": {
-                "seconds": {"type": "number"},
-                "label": {"type": "string"},
-                "action": {"type": "string", "enum": ["notify", "play_media", "run_script"]},
-                "media_player_entity_id": {"type": "string"},
-                "media_url": {"type": "string"},
-                "media_content_type": {"type": "string"},
-                "script_id": {"type": "string"},
-            }, "required": ["seconds"]},
-        ),
-        types.FunctionDeclaration(
-            name="list_timers",
-            description="List all active timers and their remaining time. Use for questions like 'how much time is left' or 'what timers are active'.",
-            parameters={"type": "object", "properties": {}},
-        ),
-        types.FunctionDeclaration(
-            name="cancel_timer",
-            description="Cancel active timer by id, exact label, or all timers. Use for requests like 'cancel timer', 'cancel music timer', or 'cancel all timers'.",
-            parameters={"type": "object", "properties": {
-                "timer_id": {"type": "string"},
-                "label": {"type": "string"},
-                "cancel_all": {"type": "boolean"},
-            }},
-        ),
-        types.FunctionDeclaration(
-            name="stop_timer_alarm",
-            description="Stop ringing timer alarm audio. Use when the user says enough, stop, wystarczy, stop timer, or asks to silence a finished timer.",
-            parameters={"type": "object", "properties": {
-                "timer_id": {"type": "string"},
-                "label": {"type": "string"},
-                "stop_all": {"type": "boolean"},
-            }},
-        ),
-        types.FunctionDeclaration(
-            name="search_web",
-            description="Search web for current info (weather, news). Use when user asks a question.",
-            parameters={"type": "object", "properties": {
-                "query": {"type": "string"},
-            }, "required": ["query"]},
-        ),
-        types.FunctionDeclaration(
-            name="set_climate",
-            description="Set climate/AC temperature and mode.",
-            parameters={"type": "object", "properties": {
-                "entity_id": {"type": "string"},
-                "temperature": {"type": "number"},
-                "hvac_mode": {"type": "string", "enum": ["off", "cool", "heat", "auto", "fan_only", "dry"]},
-            }, "required": ["entity_id"]},
-        ),
+            name=spec["name"],
+            description=spec["description"],
+            parameters=spec["parameters"],
+        )
+        for spec in build_tool_specs(room_keys, vacuum_enabled)
     ]
-    if vacuum_enabled:
-        declarations.append(types.FunctionDeclaration(
-            name="control_vacuum",
-            description=(
-                "Control robot vacuum only when the user explicitly mentions the robot vacuum, "
-                "odkurzacz, robot sprzatajacy, sprzatanie, or docking the vacuum. "
-                "Never use this for lights, lamps, devices, or pronouns like it/her."
-            ),
-            parameters={"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["start", "return_to_base"]},
-            }, "required": ["action"]},
-        ))
     return [types.Tool(function_declarations=declarations)]
+
 
 
 class GeminiSession:
@@ -260,29 +72,8 @@ class GeminiSession:
         self.local_area_id = local_area_id
 
     def _build_prompt(self) -> str:
-        local_context = ""
-        if self.local_area_id:
-            local_context = (
-                f"\nCurrent Voice PE area: {self.local_area_id}\n"
-                "For commands without an explicit room/location, prefer devices marked local=true.\n"
-            )
-        prompt = SYSTEM_PROMPT_TEMPLATE.format(
-            entities=self.entity_list,
-            context=f"{local_context}{self.ha_context}",
-            response_language=ASSISTANT_RESPONSE_LANGUAGE,
-            assistant_name=ASSISTANT_NAME,
-            assistant_gender=ASSISTANT_GENDER,
-            assistant_speaking_style=ASSISTANT_SPEAKING_STYLE,
-        )
-        prompt += build_persona_prompt()
-        if self.history:
-            prompt += "\n=== OSTATNIA ROZMOWA ===\n"
-            for h in self.history:
-                role = "Użytkownik" if h["role"] == "user" else "Asystent"
-                prompt += f"{role}: {h['text']}\n"
-            prompt += "=== KONIEC ===\n"
-        prompt += FOLLOW_UP_RESOLUTION_PROMPT
-        return prompt
+        return build_prompt(self.entity_list, self.ha_context, self.history,
+                            self.local_area_id)
 
     async def stream_audio(
         self,
@@ -307,11 +98,10 @@ class GeminiSession:
             system_instruction=types.Content(parts=[types.Part(text=prompt)]),
             tools=build_tools(room_keys, self.vacuum_enabled),
             realtime_input_config=types.RealtimeInputConfig(
-                automatic_activity_detection=types.AutomaticActivityDetection(
-                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
-                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
-                    silence_duration_ms=GEMINI_SILENCE_DURATION_MS,
-                ),
+                # Manual activity detection — proxy runs its own VAD; Gemini's auto-VAD never
+                # sees the turn end once we stop sending and waits forever. Disable it and send
+                # explicit activity_start/activity_end so the turn ends deterministically.
+                automatic_activity_detection=types.AutomaticActivityDetection(disabled=True),
                 activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
             ),
         )
@@ -333,10 +123,14 @@ class GeminiSession:
                         chunk_n += 1
                         if chunk_n == 1:
                             debug_log("  [gemini] Sending audio to Gemini...")
+                            await session.send_realtime_input(activity_start=types.ActivityStart())
                         await session.send_realtime_input(
                             audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"),
                         )
-                    await session.send_realtime_input(audio_stream_end=True)
+                    if chunk_n:
+                        await session.send_realtime_input(activity_end=types.ActivityEnd())
+                    else:
+                        await session.send_realtime_input(audio_stream_end=True)
                     debug_log(f"  [gemini] Audio stream ended, {chunk_n} chunks ({(time.monotonic()-t0)*1000:.0f}ms)")
                 except Exception as e:
                     print(f"  [gemini] SEND ERROR after {chunk_n} chunks: {e}", flush=True)
@@ -452,17 +246,4 @@ class GeminiSession:
 
     async def _do_search(self, query: str) -> dict:
         """Search web using Gemini generate_content + Google Search."""
-        debug_log(f"  [search] {query}")
-        try:
-            response = await self.client.aio.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=f"{query}. Answer in one sentence in {ASSISTANT_RESPONSE_LANGUAGE}.",
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                ),
-            )
-            debug_log(f"  [search] -> {response.text[:100]}")
-            return {"result": response.text}
-        except Exception as err:
-            print(f"  [search] ERROR: {err}")
-            return {"error": str(err)}
+        return await web_search(query, self.client)

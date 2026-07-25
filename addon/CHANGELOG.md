@@ -2,6 +2,20 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.1.0
+
+- Add OpenAI Realtime as an alternative voice backend alongside Gemini Live.
+  Both share one system prompt and one tool catalogue; only the model differs.
+- Add `ai_provider` to pick the backend, and `ai_provider_entity` to switch it
+  live from a Home Assistant dropdown without restarting the add-on.
+- Add `openai_api_key`, `openai_model` (default `gpt-realtime-2.1-mini`) and
+  `openai_voice` (default `marin`).
+- The 16 kHz device stream is resampled to the 24 kHz the OpenAI API requires;
+  no firmware or hardware change is needed. Reply audio is 24 kHz for both
+  providers, so the existing ESP32 playback path is untouched.
+- `search_web` continues to run on Gemini regardless of the selected provider,
+  so switching backends does not change what the assistant can look up.
+
 ## 1.0.25
 
 - Added input/output audio transcription logging (`HEARD`/`SAID`) to diagnose why a spoken command did or did not trigger an action.

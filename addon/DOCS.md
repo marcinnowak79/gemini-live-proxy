@@ -26,6 +26,59 @@ more than playback smoothness.
 
 ## Add-on Options
 
+### `ai_provider`
+
+Which backend answers voice commands: `gemini` (default) or `openai`. Both use
+the same system prompt, the same tools and the same Home Assistant integration —
+only the model behind the socket changes.
+
+### `ai_provider_entity`
+
+Optional. An `input_select` entity read at the start of **every** session, which
+overrides `ai_provider`. This lets you switch backends from a dashboard without
+restarting the add-on, so you can compare them on consecutive commands.
+
+Create a dropdown helper (Settings → Devices & Services → Helpers) with options
+such as `Gemini` and `ChatGPT`, then point this option at it, e.g.
+`input_select.asystent_model`. Matching is fuzzy: `Gemini`/`Google` select
+Gemini, and `ChatGPT`/`OpenAI`/`GPT` select OpenAI.
+
+If the entity is missing, unreadable, or holds an unrecognized value, the
+add-on falls back to `ai_provider` and logs why — a broken helper never takes
+the assistant down.
+
+### `openai_api_key`
+
+Required when OpenAI is selected. Note that the `search_web` tool still runs on
+Gemini, so keep `gemini_api_key` set even when OpenAI answers the audio.
+
+### `openai_model`
+
+Defaults to `gpt-realtime-2.1`. Do not drop to `gpt-realtime-2.1-mini` for a
+setup with many similarly-named entities: measured on this installation (44
+exposed entities, the command "włącz lampkę na biurku", 10 runs each), the mini
+model picked the correct entity 7/10 times, repeatedly turning on a desk lamp in
+another room instead. The full model scored 10/10, as did Gemini.
+
+Strengthening the "prefer local=true" prompt rule did **not** help the mini model
+(6/10), so this is a capacity limit rather than a wording problem.
+
+### `openai_voice`
+
+Defaults to `cedar`. Other options include `marin`, `alloy`, `sage`, `verse`,
+`echo`, `shimmer`. The Gemini voice setting (`gemini_voice`) does not apply
+here — the two providers have completely separate voice catalogues.
+
+**Polish pronunciation.** Gemini pins output speech with
+`speech_config.language_code = pl-PL`; the Realtime API has **no equivalent
+parameter**, so the prompt is the only signal. The stock instruction
+("Always speak in {response_language}") is not enough and the model reads Polish
+with an English accent. `openai_session.py` therefore appends its own
+`SPEECH_STYLE_PROMPT` describing Polish phonetics (nasal vowels, soft
+consonants, penultimate stress). Override it with the
+`OPENAI_SPEECH_STYLE_PROMPT` environment variable if you switch languages;
+do not simply delete it, or pronunciation regresses.
+
 ### `gemini_api_key`
 
 Required. Your Google Gemini API key.

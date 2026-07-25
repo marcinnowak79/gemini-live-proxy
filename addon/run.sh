@@ -2,9 +2,14 @@
 
 bashio::log.info "Starting Gemini Live Proxy..."
 
+export AI_PROVIDER=$(bashio::config 'ai_provider')
+export AI_PROVIDER_ENTITY=$(bashio::config 'ai_provider_entity')
 export GEMINI_API_KEY=$(bashio::config 'gemini_api_key')
 export GEMINI_MODEL=$(bashio::config 'gemini_model')
 export GEMINI_VOICE=$(bashio::config 'gemini_voice')
+export OPENAI_API_KEY=$(bashio::config 'openai_api_key')
+export OPENAI_MODEL=$(bashio::config 'openai_model')
+export OPENAI_VOICE=$(bashio::config 'openai_voice')
 export ASSISTANT_NAME=$(bashio::config 'assistant_name')
 export ASSISTANT_GENDER=$(bashio::config 'assistant_gender')
 export ASSISTANT_SPEAKING_STYLE=$(bashio::config 'assistant_speaking_style')

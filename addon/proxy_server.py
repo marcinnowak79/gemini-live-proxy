@@ -28,7 +28,7 @@ from google import genai
 
 from protocol import *
 from ha_client import get_exposed_entities, get_ha_context, execute_function, is_vacuum_enabled
-from gemini_session import GeminiSession
+from ai_provider import create_session, resolve_provider
 from timer_manager import TimerManager
 
 load_dotenv()
@@ -42,9 +42,12 @@ MIC_RMS_MIN_SPEECH = float(os.getenv("MIC_RMS_MIN_SPEECH", "650"))
 MIC_RMS_SPEECH_RATIO = float(os.getenv("MIC_RMS_SPEECH_RATIO", "3.0"))
 MIC_RMS_NOISE_ALPHA = float(os.getenv("MIC_RMS_NOISE_ALPHA", "0.08"))
 MIC_RMS_INITIAL_NOISE = float(os.getenv("MIC_RMS_INITIAL_NOISE", "120"))
-MIC_SILENCE_TIMEOUT_MS = int(os.getenv("MIC_SILENCE_TIMEOUT_MS", "3500"))
+MIC_SILENCE_TIMEOUT_MS = int(os.getenv("MIC_SILENCE_TIMEOUT_MS", "2400"))
 MIC_NO_SPEECH_TIMEOUT_MS = int(os.getenv("MIC_NO_SPEECH_TIMEOUT_MS", "3500"))
-MIC_MAX_STREAM_MS = int(os.getenv("MIC_MAX_STREAM_MS", "8000"))
+MIC_MAX_STREAM_MS = int(os.getenv("MIC_MAX_STREAM_MS", "7000"))
+# Min consecutive above-threshold chunks to count as real speech (ignore lone crackles
+# that would otherwise keep resetting the end-of-speech timer and run to MAX_STREAM).
+MIC_VOICE_RUN_MIN = int(os.getenv("MIC_VOICE_RUN_MIN", "2"))
 SESSION_TIMEOUT_SECONDS = float(os.getenv("SESSION_TIMEOUT_SECONDS", "30"))
 GEMINI_RETRY_TIMEOUT_SECONDS = float(os.getenv("GEMINI_RETRY_TIMEOUT_SECONDS", "10"))
 GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "0"))
@@ -55,6 +58,12 @@ SAVE_INPUT_AUDIO = os.getenv("SAVE_INPUT_AUDIO", "false").lower() in ("1", "true
 INPUT_AUDIO_DIR = os.getenv("INPUT_AUDIO_DIR", "/share/gemini_in")
 INPUT_AUDIO_KEEP = int(os.getenv("INPUT_AUDIO_KEEP", "100000"))
 INPUT_AUDIO_SAMPLE_RATE = 16000
+# DISABLED (default 0). A blind fixed-time lead trim clips the start of fast commands
+# (e.g. "wyłącz" -> "...cz"), losing words and flipping on/off. The wake beep plays BEFORE
+# speech and is harmless to Gemini, so we no longer trim. A future smarter version could
+# detect the beep by its known frequency signature and trim only up to its real end.
+STREAM_TRIM_LEAD_MS = int(os.getenv("STREAM_TRIM_LEAD_MS", "0"))
+STREAM_TRIM_LEAD_BYTES = int(INPUT_AUDIO_SAMPLE_RATE * 2 * STREAM_TRIM_LEAD_MS / 1000)
 RESPONSE_SAMPLE_RATE = 48000
 RESPONSE_SAMPLE_WIDTH = 2
 RESPONSE_PREBUFFER_MS = int(os.getenv("RESPONSE_PREBUFFER_MS", "700"))
@@ -477,8 +486,13 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 remember_action(n, a, result)
                 return result
 
-            session = GeminiSession(
-                client=client,
+            # resolved per session so the HA selector switches providers live
+            provider = await resolve_provider()
+            print(f"  [stream] provider={provider}", flush=True)
+
+            session = create_session(
+                provider,
+                gemini_client=client,
                 entity_list=entity_list,
                 room_lights=room_lights,
                 ha_context=session_context,
@@ -497,6 +511,8 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 stream_started = time.monotonic()
                 last_voice = stream_started
                 speech_started = False
+                voice_run = 0
+                lead_trim_remaining = STREAM_TRIM_LEAD_BYTES
                 peak_max = 0
                 rms_max = 0.0
                 noise_floor = MIC_RMS_INITIAL_NOISE
@@ -555,15 +571,29 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                             speech_threshold = max(MIC_RMS_MIN_SPEECH, noise_floor * MIC_RMS_SPEECH_RATIO)
                             is_voice = rms >= speech_threshold
                             if is_voice:
+                                voice_run += 1
+                                # A lone above-threshold chunk (household crackle/click) must
+                                # NOT reset the end-of-speech timer — otherwise intermittent
+                                # ambient noise keeps the stream open until MAX_STREAM. Only
+                                # sustained voice (or the very first onset) counts.
+                                if not speech_started or voice_run >= MIC_VOICE_RUN_MIN:
+                                    last_voice = time.monotonic()
                                 speech_started = True
-                                last_voice = time.monotonic()
                             else:
+                                voice_run = 0
                                 noise_floor = (
                                     (1.0 - MIC_RMS_NOISE_ALPHA) * noise_floor
                                     + MIC_RMS_NOISE_ALPHA * max(rms, 1.0)
                                 )
                             chunk_count += 1
                             total_bytes += len(d)
+                            # Strip the leading wake-beep bytes before Gemini/saving.
+                            if lead_trim_remaining > 0:
+                                if len(pcm) <= lead_trim_remaining:
+                                    lead_trim_remaining -= len(pcm)
+                                    continue
+                                pcm = pcm[lead_trim_remaining:]
+                                lead_trim_remaining = 0
                             buffered_pcm_chunks.append(pcm)
                             yield pcm
                 finally:
@@ -604,6 +634,12 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 print(f"  [stream] Session timeout ({SESSION_TIMEOUT_SECONDS:.0f}s)", flush=True)
                 timed_out = True
                 summary = ""
+            except Exception as e:
+                # Any Gemini/connect failure must NOT wedge the device: fall through to
+                # the error-tone + RESPONSE_END cleanup path so the mic is freed.
+                print(f"  [stream] Session error: {type(e).__name__}: {e}", flush=True)
+                timed_out = True
+                summary = ""
             finally:
                 stop_streaming = True
                 keep_reading_esp32 = False
@@ -629,8 +665,9 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                     for chunk in buffered_pcm_chunks:
                         yield chunk
 
-                retry_session = GeminiSession(
-                    client=client,
+                retry_session = create_session(
+                    provider,
+                    gemini_client=client,
                     entity_list=entity_list,
                     room_lights=room_lights,
                     ha_context=session_context,
@@ -653,9 +690,17 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 except asyncio.TimeoutError:
                     print(f"  [stream] Gemini retry timeout ({GEMINI_RETRY_TIMEOUT_SECONDS:.0f}s)", flush=True)
                     summary = ""
+                except Exception as e:
+                    print(f"  [stream] Gemini retry error: {type(e).__name__}: {e}", flush=True)
+                    summary = ""
 
-            if timed_out and not first_chunk_sent:
-                print("  [stream] Playing local fallback error tone", flush=True)
+            # Play the "didn't understand" tone whenever NOTHING happened: no response audio
+            # was streamed AND there was no action/result. Covers both timeouts and clean
+            # empty responses (e.g. Gemini returned nothing for a noisy/empty utterance) so
+            # the user never gets dead silence and knows to repeat.
+            if not first_chunk_sent and not summary:
+                reason = "timeout" if timed_out else "no result"
+                print(f"  [stream] Playing local fallback error tone ({reason})", flush=True)
                 fallback = make_error_tone_pcm()
                 for offset in range(0, len(fallback), 4096):
                     await send_audio_to_esp32(fallback[offset:offset + 4096])
@@ -781,8 +826,9 @@ async def run_local_test(entity_list, room_lights, local_area_id=""):
                 remember_action(n, a, result)
                 return result
 
-            session = GeminiSession(
-                client=client,
+            session = create_session(
+                await resolve_provider(),
+                gemini_client=client,
                 entity_list=entity_list,
                 room_lights=room_lights,
                 ha_context=session_context,

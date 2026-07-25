@@ -1,6 +1,6 @@
 name: "Gemini Live Proxy"
 slug: gemini_live_proxy
-version: "1.0.25"
+version: "1.1.0"
 description: "WebSocket proxy between ESP32 Voice PE and Gemini Live API"
 image: "ghcr.io/marcinnowak79/gemini-live-proxy-{arch}"
 arch:
@@ -19,9 +19,14 @@ ports_description:
   8765/tcp: "WebSocket server for ESP32"
   8766/tcp: "HTTP audio streaming"
 options:
+  ai_provider: "gemini"
+  ai_provider_entity: ""
   gemini_api_key: ""
   gemini_model: "gemini-3.1-flash-live-preview"
   gemini_voice: "Charon"
+  openai_api_key: ""
+  openai_model: "gpt-realtime-2.1"
+  openai_voice: "cedar"
   assistant_name: "Dżefrej"
   assistant_gender: "male"
   assistant_speaking_style: "Steady, efficient, and unhurried. Tone is empathetic, crisp, reassuring, and lightly dry/sarcastic when appropriate. Avoid exaggerated enthusiasm, theatrical delivery, and long explanations."
@@ -70,9 +75,14 @@ options:
   timer_default_script_id: ""
   timer_alarm_repeat_interval_seconds: 3
 schema:
+  ai_provider: "list(gemini|openai)?"
+  ai_provider_entity: str?
   gemini_api_key: str
   gemini_model: str?
   gemini_voice: str?
+  openai_api_key: str?
+  openai_model: str?
+  openai_voice: str?
   assistant_name: str?
   assistant_gender: str?
   assistant_speaking_style: str?
