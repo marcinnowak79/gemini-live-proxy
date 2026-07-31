@@ -1,6 +1,6 @@
 name: "Gemini Live Proxy"
 slug: gemini_live_proxy
-version: "1.2.0"
+version: "1.2.1"
 description: "WebSocket proxy between ESP32 Voice PE and Gemini Live API"
 image: "ghcr.io/marcinnowak79/gemini-live-proxy-{arch}"
 arch:
@@ -51,7 +51,7 @@ options:
     - When a timer alarm is ringing and the user says "stop", "enough", "wystarczy", "stop timer", or similar, call stop_timer_alarm.
     - For requests like "play music after X minutes", call set_timer with action=play_media.
     - For requests like "run a scene/script after X minutes", call set_timer with action=run_script when a script is available.
-    - Climate: for heating, cooling, AC or temperature changes, call set_climate.
+    - Climate: for heating, cooling, AC, temperature or fan speed changes, call set_climate.
     - Time and date: use the current context below. Do not call search_web for time/date.
     - Questions about current information, weather or news: call search_web, then answer with the result.
     - activate_scene only when the user explicitly asks for a scene by name.

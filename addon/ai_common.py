@@ -52,7 +52,7 @@ Rules:
 - When a timer alarm is ringing and the user says "stop", "enough", "wystarczy", "stop timer", or similar, call stop_timer_alarm.
 - For requests like "play music after X minutes", call set_timer with action=play_media.
 - For requests like "run a scene/script after X minutes", call set_timer with action=run_script when a script is available.
-- Climate: for heating, cooling, AC or temperature changes, call set_climate.
+- Climate: for heating, cooling, AC, temperature or fan speed changes, call set_climate.
 - Time and date: use the current context below. Do not call search_web for time/date.
 - Questions about current information, weather or news: call search_web, then answer with the result.
 - activate_scene only when the user explicitly asks for a scene by name.
@@ -92,6 +92,19 @@ Listen carefully to the first syllable: "WY-łącz" (off) has an extra "y" vowel
 Air conditioning ("klimatyzacja"): when asked to turn it ON without a named mode, call
 set_climate with hvac_mode=cool. Use hvac_mode=heat ONLY if the user explicitly says heating
 ("grzanie", "ogrzewanie", "ciepło", "grzej"). For "wyłącz klimatyzację" use hvac_mode=off.
+
+Fan speed ("nawiew", "dmuchawa", "wiatrak", "bieg", "obroty"): call set_climate with fan_mode.
+Map Polish to the fan_mode enum:
+- "mocniej", "szybciej", "na maksa", "maksymalnie", "najmocniej", "full" -> high
+- "ciszej", "wolniej", "słabiej", "delikatnie", "minimum", "najciszej" -> low
+- "średnio", "średni nawiew" -> medium
+- "automatyczny nawiew", "auto" -> auto
+Send fan_mode ALONE when the user only talks about airflow — do not also change hvac_mode or
+temperature. Note that a request to change the fan is NOT a request to make the room warmer or
+colder: "mocniejszy nawiew" means fan_mode=high, never a temperature change.
+For relative requests such as "trochę mocniej" or "o jeden bieg mniej", first call
+get_device_state to read the current fan_mode, then move one step along the enum order
+auto < low < medium low < medium < medium high < high.
 === END INPUT LANGUAGE ===
 """
 
@@ -273,11 +286,16 @@ def build_tool_specs(room_keys: list[str], vacuum_enabled: bool = False) -> list
         },
         {
             "name": "set_climate",
-            "description": "Set climate/AC temperature and mode.",
+            "description": "Set climate/AC temperature, mode and fan speed.",
             "parameters": {"type": "object", "properties": {
                 "entity_id": {"type": "string"},
                 "temperature": {"type": "number"},
                 "hvac_mode": {"type": "string", "enum": ["off", "cool", "heat", "auto", "fan_only", "dry"]},
+                "fan_mode": {
+                    "type": "string",
+                    "enum": ["auto", "low", "medium low", "medium", "medium high", "high"],
+                    "description": "Fan speed. Only set when the user asks about the airflow/fan itself.",
+                },
             }, "required": ["entity_id"]},
         },
     ]

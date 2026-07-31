@@ -2,6 +2,16 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.2.1
+
+- Let the assistant set air-conditioning fan speed. `set_climate` takes a
+  `fan_mode` parameter and calls `climate.set_fan_mode`, so "mocniejszy nawiew"
+  changes the airflow instead of silently doing nothing or moving the
+  temperature. The prompt maps the Polish wording onto the enum and tells the
+  model to send `fan_mode` alone, never bundled with an `hvac_mode` change.
+- Expose `fan_mode` in device state, so the assistant can answer questions about
+  the current fan speed and resolve relative requests such as "trochę mocniej".
+
 ## 1.2.0
 
 - Add a plugin system for capabilities that are not smart-home control. Plugins

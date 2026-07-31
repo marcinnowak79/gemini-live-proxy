@@ -63,6 +63,7 @@ STATE_ATTRIBUTE_ALLOWLIST = {
     "brightness",
     "current_temperature",
     "device_class",
+    "fan_mode",
     "friendly_name",
     "hvac_action",
     "media_title",
@@ -386,6 +387,9 @@ async def execute_function(name: str, args: dict, room_lights: dict) -> dict:
         if "temperature" in args:
             tasks.append(call_ha_service("climate", "set_temperature",
                                          {"entity_id": entity_id, "temperature": args["temperature"]}))
+        if "fan_mode" in args:
+            tasks.append(call_ha_service("climate", "set_fan_mode",
+                                         {"entity_id": entity_id, "fan_mode": args["fan_mode"]}))
         if tasks:
             await asyncio.gather(*tasks)
         return {"status": "ok"}
