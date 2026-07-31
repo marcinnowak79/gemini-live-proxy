@@ -62,6 +62,15 @@ configuration:
   timer_alarm_repeat_interval_seconds:
     name: Alarm repeat interval
     description: How often, in seconds, the timer alarm repeats until the user stops it. Lower values are more insistent; higher values are less intrusive.
+  plugins_dir:
+    name: Plugins directory
+    description: Where the proxy looks for plugins that add capabilities beyond smart-home control, such as office parking booking. Each subdirectory holding a plugin.py is loaded at startup; one that fails is skipped and logged. Keep /share/asystent_plugins so plugins and their credentials survive add-on updates.
+  plugin_timeout_seconds:
+    name: Plugin call timeout
+    description: How long a single plugin call may take before it is abandoned and reported as an error. Capped at 7.5 s, because the voice providers stop waiting for a tool call at around 8 s and a silent assistant is worse than an error it can say out loud.
+  plugin_api_token:
+    name: Plugin API token
+    description: Shared secret for POST /plugins/<id>/secret/<name> on port 8766, used to push in credentials that expire and can only be created elsewhere - for example the parking cookie refreshed weekly from a Mac. Leave empty to disable the endpoint entirely.
 network:
   8765/tcp: Main WebSocket channel between Voice PE and the proxy. Firmware should point to ws://home-assistant:8765; microphone audio and control messages use this port.
   8766/tcp: WAV/HTTP server used by the ESP32 media player to play Gemini responses. The proxy sends /response/<session>.wav over WebSocket and the device downloads audio from this port.

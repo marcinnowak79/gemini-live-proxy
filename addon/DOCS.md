@@ -237,6 +237,33 @@ Voice commands supported by the timer tool include:
 - playing configured media after a timer
 - running a configured script after a timer
 
+### Plugin options
+
+Plugins add capabilities that are not smart-home control — the office parking
+booking is the first one. They live outside the image, in a directory under
+`/share`, so adding one is a copy plus a restart instead of a rebuild and a
+release, and their credentials survive add-on updates.
+
+`plugins_dir` is where the proxy looks for them. The default is
+`/share/asystent_plugins`. Each subdirectory containing a `plugin.py` is loaded;
+one that fails to import, raises or hangs is logged and skipped, and the
+assistant carries on without it.
+
+`plugin_timeout_seconds` bounds a single plugin call. The default is `6`, capped
+at 7.5 — beyond that the voice provider stops waiting for the tool and the
+assistant goes silent, which is worse than an error it can narrate.
+
+`plugin_api_token` enables `POST /plugins/<id>/secret/<name>` on the HTTP port,
+used to push in credentials that expire and can only be minted elsewhere:
+
+```bash
+curl -X POST http://<ha-host>:8766/plugins/parking/secret/cookie \
+     -H "X-Plugin-Token: <plugin_api_token>" --data-binary "$COOKIE"
+```
+
+The endpoint only routes; the plugin decides whether to accept the value. Left
+empty — the default — it returns 403 and writes nothing.
+
 ## ESPHome Configuration
 
 Set the proxy URL in your ESPHome `secrets.yaml`:

@@ -7,6 +7,8 @@ adapts these plain dicts to its own SDK types.
 import json
 import os
 
+from plugins import registry as plugin_registry
+
 MODEL_PROVIDERS = ("gemini", "openai")
 
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Dżefrej")
@@ -151,6 +153,7 @@ def build_prompt(entity_list: str, ha_context: str, history: list,
             prompt += f"{role}: {h['text']}\n"
         prompt += "=== KONIEC ===\n"
     prompt += FOLLOW_UP_RESOLUTION_PROMPT
+    prompt += plugin_registry.prompt_block()
     return prompt
 
 
@@ -290,19 +293,38 @@ def build_tool_specs(room_keys: list[str], vacuum_enabled: bool = False) -> list
                 "action": {"type": "string", "enum": ["start", "return_to_base"]},
             }, "required": ["action"]},
         })
+    specs.extend(plugin_registry.tool_specs())
     return specs
 
 
 # Tools whose *result* is the answer the user is waiting to hear. Everything
 # else is an action the assistant already acknowledged out loud before calling
 # it, so narrating the result a second time only adds latency and chatter.
-QUERY_TOOLS = frozenset({
+BUILTIN_QUERY_TOOLS = frozenset({
     "get_device_state",
     "get_room_state",
     "get_printer_status",
     "list_timers",
     "search_web",
 })
+
+
+class _QueryTools:
+    """The query-tool set, resolved live so plugins can contribute to it.
+
+    Plugins load after this module is imported, and a plugin action whose
+    outcome is uncertain — a booking that may find nothing free — belongs in
+    here just as much as get_device_state does.
+    """
+
+    def __contains__(self, name: object) -> bool:
+        return name in BUILTIN_QUERY_TOOLS or name in plugin_registry.query_tools()
+
+    def __iter__(self):
+        return iter(BUILTIN_QUERY_TOOLS | plugin_registry.query_tools())
+
+
+QUERY_TOOLS = _QueryTools()
 
 
 class StreamResampler:

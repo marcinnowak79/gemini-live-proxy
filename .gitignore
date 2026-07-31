@@ -7,3 +7,6 @@ captures_normalized/
 __pycache__/
 *.py[cod]
 .DS_Store
+
+# Plugin credentials never belong in git (parking cookie, future secrets)
+plugin_packages/*/credentials/

@@ -45,6 +45,10 @@ export TIMER_DEFAULT_MEDIA_URL=$(bashio::config 'timer_default_media_url')
 export TIMER_DEFAULT_MEDIA_CONTENT_TYPE=$(bashio::config 'timer_default_media_content_type')
 export TIMER_DEFAULT_SCRIPT_ID=$(bashio::config 'timer_default_script_id')
 export TIMER_ALARM_REPEAT_INTERVAL_SECONDS=$(bashio::config 'timer_alarm_repeat_interval_seconds')
+export PLUGINS_DIR=$(bashio::config 'plugins_dir')
+export PLUGIN_TIMEOUT_SECONDS=$(bashio::config 'plugin_timeout_seconds')
+export PLUGIN_API_TOKEN=$(bashio::config 'plugin_api_token')
+
 export HA_URL="http://supervisor/core"
 export HA_TOKEN="${SUPERVISOR_TOKEN}"
 

@@ -2,6 +2,27 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.2.0
+
+- Add a plugin system for capabilities that are not smart-home control. Plugins
+  live in `/share/asystent_plugins/` and contribute their tools, their prompt
+  lines and their query-tool flags at startup, so adding one is a copy plus a
+  restart rather than an image rebuild and a release. A plugin that fails to
+  import, raises or hangs is logged and skipped; the assistant keeps working
+  without it, and tool names are namespaced so a plugin cannot shadow
+  `control_device` or any other built-in.
+- Blocking plugin code runs in a worker thread, keeping a plain HTTP client out
+  of the audio path, and every call is bounded by a timeout below the window
+  the voice providers allow for a dispatched tool.
+- Add `POST /plugins/<id>/secret/<name>` on the HTTP port for credentials that
+  expire and can only be minted elsewhere. Guarded by the new
+  `plugin_api_token` option and disabled entirely when it is unset; the plugin
+  itself decides whether to accept the pushed value.
+- New options: `plugins_dir`, `plugin_timeout_seconds`, `plugin_api_token`.
+- Plugins themselves are not part of this repository: they are deployed
+  straight to `/share/asystent_plugins/`, which keeps site-specific code and
+  credentials out of a public image.
+
 ## 1.1.1
 
 - Fix OpenAI commands that were spoken but never executed. The Realtime API

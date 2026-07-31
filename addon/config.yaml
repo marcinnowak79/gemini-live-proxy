@@ -1,6 +1,6 @@
 name: "Gemini Live Proxy"
 slug: gemini_live_proxy
-version: "1.1.1"
+version: "1.2.0"
 description: "WebSocket proxy between ESP32 Voice PE and Gemini Live API"
 image: "ghcr.io/marcinnowak79/gemini-live-proxy-{arch}"
 arch:
@@ -74,6 +74,9 @@ options:
   timer_default_media_content_type: "music"
   timer_default_script_id: ""
   timer_alarm_repeat_interval_seconds: 3
+  plugins_dir: "/share/asystent_plugins"
+  plugin_timeout_seconds: 6
+  plugin_api_token: ""
 schema:
   ai_provider: "list(gemini|openai)?"
   ai_provider_entity: str?
@@ -102,6 +105,9 @@ schema:
   timer_default_media_content_type: str?
   timer_default_script_id: str?
   timer_alarm_repeat_interval_seconds: float?
+  plugins_dir: str?
+  plugin_timeout_seconds: float?
+  plugin_api_token: password?
 startup: application
 boot: auto
 init: false

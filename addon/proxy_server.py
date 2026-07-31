@@ -29,6 +29,7 @@ from google import genai
 from protocol import *
 from ha_client import get_exposed_entities, get_ha_context, execute_function, is_vacuum_enabled
 from ai_provider import create_session, resolve_provider
+from plugins import registry as plugin_registry
 from timer_manager import TimerManager
 
 load_dotenv()
@@ -68,6 +69,10 @@ RESPONSE_SAMPLE_RATE = 48000
 RESPONSE_SAMPLE_WIDTH = 2
 RESPONSE_PREBUFFER_MS = int(os.getenv("RESPONSE_PREBUFFER_MS", "700"))
 RESPONSE_PREBUFFER_BYTES = int(RESPONSE_SAMPLE_RATE * RESPONSE_SAMPLE_WIDTH * RESPONSE_PREBUFFER_MS / 1000)
+# Shared secret for pushing rotated plugin credentials in. Empty disables the
+# endpoint outright — an unauthenticated credential writer is not a default.
+_plugin_token_raw = os.getenv("PLUGIN_API_TOKEN", "").strip()
+PLUGIN_API_TOKEN = "" if _plugin_token_raw.lower() == "null" else _plugin_token_raw
 
 
 def debug_log(message: str):
@@ -310,6 +315,9 @@ async def handle_function_call(name: str, args: dict, room_lights: dict,
             label=args.get("label", ""),
             stop_all=bool(args.get("stop_all", False)),
         )
+
+    if plugin_registry.owns(name):
+        return await plugin_registry.call(name, args)
 
     return await execute_function(name, args, room_lights)
 
@@ -898,8 +906,41 @@ async def run_audio_http_server():
         await resp.write_eof()
         return resp
 
+    async def handle_plugin_secret(request):
+        """Accept a rotated credential for a plugin, e.g. the parking cookie.
+
+        Some plugin credentials can only be minted on a machine the addon cannot
+        reach — the parking cookie comes out of Chrome's keychain-encrypted store
+        on the Mac and expires roughly monthly. Rather than teach the addon to
+        pull, the holder pushes here and the plugin decides whether to keep it.
+
+        The plugin validates before storing, so a bad push cannot replace a
+        working credential with a broken one.
+        """
+        if not PLUGIN_API_TOKEN:
+            return web.json_response({"error": "plugin_api_token not configured"}, status=403)
+        if request.headers.get("X-Plugin-Token", "") != PLUGIN_API_TOKEN:
+            print(f"  [http] rejected plugin secret push from {request.remote}", flush=True)
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        plugin_id = request.match_info["plugin_id"]
+        secret_name = request.match_info["secret_name"]
+        plugin = plugin_registry.get(plugin_id)
+        if plugin is None:
+            return web.json_response({"error": f"no plugin {plugin_id}"}, status=404)
+
+        value = (await request.text()).strip()
+        if not value:
+            return web.json_response({"error": "empty body"}, status=400)
+
+        result = await plugin.deliver_secret(secret_name, value)
+        status = 200 if result.get("status") == "ok" else 400
+        print(f"  [http] plugin secret {plugin_id}/{secret_name} -> {result}", flush=True)
+        return web.json_response(result, status=status)
+
     app = web.Application()
     app.router.add_get("/response/{session_id}.wav", handle_response_wav)
+    app.router.add_post("/plugins/{plugin_id}/secret/{secret_name}", handle_plugin_secret)
     runner = web.AppRunner(app)
     await runner.setup()
     http_port = int(os.getenv("HTTP_PORT", "8766"))
@@ -919,6 +960,7 @@ async def main():
     print(f"  Entities: {len(entity_list.splitlines())}")
     print(f"  Rooms: {list(room_lights.keys())}")
     print(f"  Local area: {local_area_id or 'none'}")
+    plugin_registry.load()
     await timer_manager.start()
     if DEBUG_LOGGING:
         asyncio.create_task(event_loop_lag_monitor())
