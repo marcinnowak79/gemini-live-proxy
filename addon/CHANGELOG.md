@@ -2,6 +2,18 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.1.1
+
+- Fix OpenAI commands that were spoken but never executed. The Realtime API
+  sends its `function_call` items only after it closes the audio item, and it
+  can stay silent for up to ~2 s in between — longer than the 1.2 s post-audio
+  idle timeout, so the session was closed while the tool call was still on its
+  way. Multi-entity commands ("wyłącz klimatyzację wszędzie") speak longest and
+  stalled the most, which is why they failed while single-room commands worked.
+  While a response is open, only the general idle timeout now applies.
+- A tool call that was already dispatched is no longer cancelled when the
+  receive loop exits, so the command still reaches Home Assistant.
+
 ## 1.1.0
 
 - Add OpenAI Realtime as an alternative voice backend alongside Gemini Live.

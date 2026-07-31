@@ -196,9 +196,22 @@ class OpenAISession:
                     pending_meta: dict[str, str] = {}
                     rounds = 0
                     got_audio = False
+                    # True from response.created until response.done. The API
+                    # emits the function_call items *after* the audio item is
+                    # closed, and it can sit silent for ~2s between the last
+                    # audio delta and response.output_audio.done — long enough
+                    # for the short post-audio timeout to hang up on a response
+                    # whose tool calls have not been sent yet. Multi-entity
+                    # commands ("wyłącz klimatyzację wszędzie") speak longer and
+                    # stall the most, so they were the ones silently doing
+                    # nothing. While a response is open, only the general
+                    # timeout applies.
+                    response_active = False
 
                     while True:
-                        if pending:
+                        if response_active:
+                            idle = RECEIVE_IDLE_TIMEOUT_GENERAL
+                        elif pending:
                             idle = RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION
                         elif got_audio:
                             idle = RECEIVE_IDLE_TIMEOUT_AFTER_AUDIO
@@ -219,6 +232,9 @@ class OpenAISession:
                             print(f"  [openai] API ERROR: {ev.get('error', {}).get('message')}",
                                   flush=True)
                             break
+
+                        if et == "response.created":
+                            response_active = True
 
                         if et == "response.output_audio.delta":
                             signal_responding("Audio started")
@@ -252,6 +268,7 @@ class OpenAISession:
                             pending_meta[call_id] = name
 
                         elif et == "response.done":
+                            response_active = False
                             if not pending:
                                 break
                             if rounds >= MAX_TOOL_ROUNDS:
@@ -285,13 +302,21 @@ class OpenAISession:
                             # been spoken yet.
                             if wants_spoken_result or not got_audio:
                                 await ws.send(json.dumps({"type": "response.create"}))
+                                response_active = True
                             else:
                                 debug_log("  [openai] action already acknowledged, "
                                           "skipping follow-up response")
                                 break
 
-                    for task in pending.values():
-                        task.cancel()
+                    # A tool already dispatched has to reach Home Assistant even
+                    # if we stopped listening to the API — cancelling here is
+                    # what turns a late response.done into a command that was
+                    # announced but never executed.
+                    if pending:
+                        _finished, still_running = await asyncio.wait(
+                            pending.values(), timeout=RECEIVE_IDLE_TIMEOUT_GENERAL)
+                        for task in still_running:
+                            task.cancel()
 
                 await asyncio.gather(send_audio(), receive_response())
 
