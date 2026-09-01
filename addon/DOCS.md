@@ -28,9 +28,9 @@ more than playback smoothness.
 
 ### `ai_provider`
 
-Which backend answers voice commands: `gemini` (default) or `openai`. Both use
-the same system prompt, the same tools and the same Home Assistant integration —
-only the model behind the socket changes.
+Which backend answers voice commands: `gemini` (default), `openai` or `grok`.
+All use the same system prompt, the same tools and the same Home Assistant
+integration — only the model behind the socket changes.
 
 ### `ai_provider_entity`
 
@@ -39,9 +39,9 @@ overrides `ai_provider`. This lets you switch backends from a dashboard without
 restarting the add-on, so you can compare them on consecutive commands.
 
 Create a dropdown helper (Settings → Devices & Services → Helpers) with options
-such as `Gemini` and `ChatGPT`, then point this option at it, e.g.
+such as `Gemini`, `ChatGPT` and `Grok`, then point this option at it, e.g.
 `input_select.asystent_model`. Matching is fuzzy: `Gemini`/`Google` select
-Gemini, and `ChatGPT`/`OpenAI`/`GPT` select OpenAI.
+Gemini, `ChatGPT`/`OpenAI`/`GPT` select OpenAI, and `Grok`/`xAI` select Grok.
 
 If the entity is missing, unreadable, or holds an unrecognized value, the
 add-on falls back to `ai_provider` and logs why — a broken helper never takes
@@ -78,6 +78,27 @@ with an English accent. `openai_session.py` therefore appends its own
 consonants, penultimate stress). Override it with the
 `OPENAI_SPEECH_STYLE_PROMPT` environment variable if you switch languages;
 do not simply delete it, or pronunciation regresses.
+
+### `xai_api_key`
+
+Required when Grok is selected. xAI's `wss://api.x.ai/v1/realtime` endpoint
+speaks the OpenAI Realtime protocol, so the whole OpenAI session machinery is
+reused — only the connection profile differs. Billing is a flat $0.05 per
+audio minute (not per token); create the key and buy prepaid credits at
+https://console.x.ai (Billing → Credits). The `search_web` tool still runs on
+Gemini, so keep `gemini_api_key` set.
+
+### `xai_model`
+
+Defaults to `grok-voice-latest`.
+
+### `xai_voice`
+
+Empty by default, which lets the server pick its own default voice — xAI's
+voice catalogue (e.g. `Ara`, `Rex`, `Eve`) is separate from both Gemini's and
+OpenAI's, and an invalid name kills the session. Input transcription (the
+`HEARD (user)` log line) is off for Grok unless `XAI_TRANSCRIBE_MODEL` is set,
+because xAI does not host OpenAI's transcription models.
 
 ### `gemini_api_key`
 

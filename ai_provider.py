@@ -10,6 +10,7 @@ import os
 import ha_client
 from ai_common import debug_log
 from gemini_session import GeminiSession
+from grok_session import GrokSession
 from openai_session import OpenAISession
 
 def _cfg(name: str, default: str = "") -> str:
@@ -28,6 +29,9 @@ _ALIASES = {
     "openai": "openai",
     "chatgpt": "openai",
     "gpt": "openai",
+    "grok": "grok",
+    "xai": "grok",
+    "x.ai": "grok",
 }
 
 
@@ -73,15 +77,18 @@ def create_session(provider: str, *, gemini_client, entity_list: str, room_light
     Both classes expose the same stream_audio(audio_chunks, on_audio_out)
     contract, so the caller needs no further branching.
     """
-    if provider == "openai":
-        return OpenAISession(
+    if provider in ("openai", "grok"):
+        # Grok speaks the same Realtime protocol; only the connection profile
+        # on the session class differs.
+        session_cls = OpenAISession if provider == "openai" else GrokSession
+        return session_cls(
             entity_list=entity_list,
             room_lights=room_lights,
             ha_context=ha_context,
             history=history,
             on_function_call=on_function_call,
             # `voice` is the caller's Gemini voice (e.g. Charon) and is meaningless
-            # here; OpenAISession falls back to OPENAI_VOICE when given None
+            # here; the session falls back to its own configured voice when given None
             voice=None,
             on_responding=on_responding,
             vacuum_enabled=vacuum_enabled,

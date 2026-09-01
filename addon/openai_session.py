@@ -4,6 +4,10 @@ Exposes the same constructor keywords and the same
 ``stream_audio(audio_chunks, on_audio_out) -> str`` contract, so proxy_server
 does not care which vendor is answering.
 
+Every vendor-specific value (endpoint, key, model, voice, transcription) lives
+in class attributes, so a protocol-compatible vendor is a subclass that only
+overrides those — see grok_session.py.
+
 Two differences from Gemini are handled here and nowhere else:
   * the API refuses input below 24 kHz, so the 16 kHz device stream is
     resampled on the fly (StreamResampler);
@@ -67,6 +71,18 @@ SPEECH_STYLE_PROMPT = os.getenv("OPENAI_SPEECH_STYLE_PROMPT", DEFAULT_SPEECH_STY
 class OpenAISession:
     """Manages one OpenAI Realtime session with streaming audio."""
 
+    # Connection profile. A subclass overrides these to point the same
+    # streaming state machine at another Realtime-compatible vendor.
+    provider = "openai"
+    ws_url_base = "wss://api.openai.com/v1/realtime"
+    api_key = OPENAI_API_KEY
+    model = OPENAI_MODEL
+    default_voice = OPENAI_VOICE
+    # Empty string disables the input-transcription block (and the HEARD line).
+    transcribe_model = OPENAI_TRANSCRIBE_MODEL
+    transcribe_language = OPENAI_TRANSCRIBE_LANGUAGE
+    speech_style_prompt = SPEECH_STYLE_PROMPT
+
     def __init__(self, entity_list: str, room_lights: dict, ha_context: str,
                  history: list, on_function_call: Callable,
                  voice: str | None = None,
@@ -79,7 +95,7 @@ class OpenAISession:
         self.ha_context = ha_context
         self.history = history
         self.on_function_call = on_function_call
-        self.voice = voice or OPENAI_VOICE
+        self.voice = voice or self.default_voice
         self.on_responding = on_responding
         self.vacuum_enabled = vacuum_enabled
         self.local_area_id = local_area_id
@@ -103,14 +119,14 @@ class OpenAISession:
 
         Returns a summary of what happened, for conversation history.
         """
-        if not OPENAI_API_KEY:
-            print("  [openai] ERROR: OPENAI_API_KEY not configured", flush=True)
+        if not self.api_key:
+            print(f"  [{self.provider}] ERROR: API key not configured", flush=True)
             return ""
 
         prompt = build_prompt(self.entity_list, self.ha_context, self.history,
-                              self.local_area_id) + SPEECH_STYLE_PROMPT
-        url = f"https://api.openai.com/v1/realtime?model={OPENAI_MODEL}".replace("https://", "wss://")
-        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+                              self.local_area_id) + self.speech_style_prompt
+        url = f"{self.ws_url_base}?model={self.model}"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
 
         function_calls_list: list[str] = []
         response_text_parts: list[str] = []
@@ -124,35 +140,42 @@ class OpenAISession:
                 responding_signaled = True
                 if self.on_responding:
                     self.on_responding()
-                debug_log(f"  [openai] {why}, stopping mic ({(time.monotonic()-t0)*1000:.0f}ms)")
+                debug_log(f"  [{self.provider}] {why}, stopping mic ({(time.monotonic()-t0)*1000:.0f}ms)")
 
         try:
+            input_audio: dict = {
+                "format": {"type": "audio/pcm", "rate": RESPONSE_SAMPLE_RATE},
+                # proxy_server runs its own VAD; server VAD would
+                # fight it and cut commands short
+                "turn_detection": None,
+            }
+            if self.transcribe_model:
+                input_audio["transcription"] = {
+                    "model": self.transcribe_model,
+                    "language": self.transcribe_language,
+                }
+            output_audio: dict = {
+                "format": {"type": "audio/pcm", "rate": RESPONSE_SAMPLE_RATE},
+            }
+            # Empty voice means "use the vendor's default" — safer than guessing
+            # a name the vendor may reject.
+            if self.voice:
+                output_audio["voice"] = self.voice
+
             async with websockets.connect(url, additional_headers=headers,
                                           max_size=None) as ws:
                 await ws.send(json.dumps({
                     "type": "session.update",
                     "session": {
                         "type": "realtime",
-                        "model": OPENAI_MODEL,
+                        "model": self.model,
                         "output_modalities": ["audio"],
                         "instructions": prompt,
                         "tools": self._tools(),
                         "tool_choice": "auto",
                         "audio": {
-                            "input": {
-                                "format": {"type": "audio/pcm", "rate": RESPONSE_SAMPLE_RATE},
-                                # proxy_server runs its own VAD; server VAD would
-                                # fight it and cut commands short
-                                "turn_detection": None,
-                                "transcription": {
-                                    "model": OPENAI_TRANSCRIBE_MODEL,
-                                    "language": OPENAI_TRANSCRIBE_LANGUAGE,
-                                },
-                            },
-                            "output": {
-                                "format": {"type": "audio/pcm", "rate": RESPONSE_SAMPLE_RATE},
-                                "voice": self.voice,
-                            },
+                            "input": input_audio,
+                            "output": output_audio,
                         },
                     },
                 }))
@@ -167,7 +190,7 @@ class OpenAISession:
                         async for chunk in audio_chunks:
                             chunk_n += 1
                             if chunk_n == 1:
-                                debug_log("  [openai] Sending audio...")
+                                debug_log(f"  [{self.provider}] Sending audio...")
                             pcm = resampler.process(chunk)
                             if pcm:
                                 await ws.send(json.dumps({
@@ -183,10 +206,10 @@ class OpenAISession:
                         if chunk_n:
                             await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
                             await ws.send(json.dumps({"type": "response.create"}))
-                        debug_log(f"  [openai] Audio stream ended, {chunk_n} chunks "
+                        debug_log(f"  [{self.provider}] Audio stream ended, {chunk_n} chunks "
                                   f"({(time.monotonic()-t0)*1000:.0f}ms)")
                     except Exception as e:  # noqa: BLE001
-                        print(f"  [openai] SEND ERROR after {chunk_n} chunks: {e}", flush=True)
+                        print(f"  [{self.provider}] SEND ERROR after {chunk_n} chunks: {e}", flush=True)
                     finally:
                         send_done = True
 
@@ -220,7 +243,7 @@ class OpenAISession:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=idle)
                         except asyncio.TimeoutError:
-                            debug_log(f"  [openai] Receive idle timeout after {idle:.1f}s")
+                            debug_log(f"  [{self.provider}] Receive idle timeout after {idle:.1f}s")
                             break
                         except websockets.ConnectionClosed:
                             break
@@ -229,7 +252,7 @@ class OpenAISession:
                         et = ev.get("type")
 
                         if et == "error":
-                            print(f"  [openai] API ERROR: {ev.get('error', {}).get('message')}",
+                            print(f"  [{self.provider}] API ERROR: {ev.get('error', {}).get('message')}",
                                   flush=True)
                             break
 
@@ -260,7 +283,7 @@ class OpenAISession:
                                 args = json.loads(ev.get("arguments") or "{}")
                             except json.JSONDecodeError:
                                 args = {}
-                            debug_log(f"  [openai] FC: {name}({args})")
+                            debug_log(f"  [{self.provider}] FC: {name}({args})")
                             function_calls_list.append(f"{name}({args})")
                             # start the tool immediately rather than waiting for
                             # response.done — this is the latency that matters
@@ -272,7 +295,7 @@ class OpenAISession:
                             if not pending:
                                 break
                             if rounds >= MAX_TOOL_ROUNDS:
-                                print(f"  [openai] tool round limit ({MAX_TOOL_ROUNDS}) reached",
+                                print(f"  [{self.provider}] tool round limit ({MAX_TOOL_ROUNDS}) reached",
                                       flush=True)
                                 break
                             rounds += 1
@@ -304,7 +327,7 @@ class OpenAISession:
                                 await ws.send(json.dumps({"type": "response.create"}))
                                 response_active = True
                             else:
-                                debug_log("  [openai] action already acknowledged, "
+                                debug_log(f"  [{self.provider}] action already acknowledged, "
                                           "skipping follow-up response")
                                 break
 
@@ -321,12 +344,12 @@ class OpenAISession:
                 await asyncio.gather(send_audio(), receive_response())
 
         except Exception as e:  # noqa: BLE001
-            print(f"  [openai] SESSION ERROR: {e}", flush=True)
+            print(f"  [{self.provider}] SESSION ERROR: {e}", flush=True)
 
         total_ms = (time.monotonic() - t0) * 1000
-        debug_log(f"  [openai] TOTAL: {total_ms:.0f}ms")
+        debug_log(f"  [{self.provider}] TOTAL: {total_ms:.0f}ms")
         if audio_out_bytes:
-            debug_log(f"  [openai] Streamed {audio_out_bytes}B audio "
+            debug_log(f"  [{self.provider}] Streamed {audio_out_bytes}B audio "
                       f"({audio_out_bytes/2/RESPONSE_SAMPLE_RATE:.1f}s)")
 
         return " ".join(function_calls_list).strip() or "".join(response_text_parts) or ""

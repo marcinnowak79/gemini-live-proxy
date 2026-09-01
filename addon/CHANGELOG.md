@@ -2,6 +2,18 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.3.0
+
+- Add xAI Grok Voice as a third backend (`ai_provider: grok`, selector values
+  `Grok`/`xAI`). The endpoint speaks the OpenAI Realtime protocol, so
+  `GrokSession` inherits the entire streaming state machine from
+  `OpenAISession` and overrides only the connection profile (endpoint, key,
+  model, voice). New options: `xai_api_key`, `xai_model`
+  (default `grok-voice-latest`), `xai_voice` (empty = server default).
+- Input transcription and the output voice are now sent only when configured,
+  so a vendor without OpenAI's transcription models or voice names gets a
+  clean session instead of an error.
+
 ## 1.2.1
 
 - Let the assistant set air-conditioning fan speed. `set_climate` takes a
