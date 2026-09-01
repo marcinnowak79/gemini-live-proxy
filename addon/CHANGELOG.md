@@ -2,6 +2,20 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.3.1
+
+- Fix silent no-ops when the model mixes up scenes and scripts:
+  `activate_scene` and `run_script` now share one handler that routes by the
+  target's real domain (`script.*` goes to `script.turn_on` even when passed
+  as a scene), tries both domains for a bare name, and returns an error for
+  an id that does not exist — HA answers 200 for `scene.turn_on` aimed at a
+  script entity while doing nothing, which the model then reported as
+  success ("zacznij wieczór" doing nothing, twice).
+- Cut end-of-command latency: local VAD silence window back to 1800 ms
+  (raised to 2400 ms in May's stability fixes; every command paid the extra
+  600 ms) and exposed as the `mic_silence_timeout_ms` option so re-tuning no
+  longer needs a release.
+
 ## 1.3.0
 
 - Add xAI Grok Voice as a third backend (`ai_provider: grok`, selector values

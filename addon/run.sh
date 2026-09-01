@@ -42,6 +42,7 @@ case "${SAVE_INPUT_AUDIO_CONFIG,,}" in
 esac
 export TIMER_MEDIA_PLAYER_ENTITY_ID=$(bashio::config 'timer_media_player_entity_id')
 export RESPONSE_PREBUFFER_MS=$(bashio::config 'response_prebuffer_ms')
+export MIC_SILENCE_TIMEOUT_MS=$(bashio::config 'mic_silence_timeout_ms')
 export SESSION_TIMEOUT_SECONDS=$(bashio::config 'session_timeout_seconds')
 export GEMINI_MAX_RETRIES=$(bashio::config 'gemini_max_retries')
 export TIMER_DEFAULT_MEDIA_URL=$(bashio::config 'timer_default_media_url')

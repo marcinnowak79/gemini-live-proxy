@@ -186,6 +186,28 @@ async def call_ha_service(domain: str, service: str, data: dict) -> dict:
             return {"status": "error", "message": f"HTTP {resp.status}: {text}"}
 
 
+async def run_scene_or_script(target_id: str) -> dict:
+    """Route a scene/script id to the right turn_on service.
+
+    Models mix the two tools up ("zacznij wieczór" produced
+    activate_scene(scene_id='script.bedroom_evening')), and HA answers 200
+    for a scene.turn_on aimed at a script entity while doing nothing — a
+    silent no-op the model then reports as success. Route by the entity's
+    real domain and refuse ids that do not exist, so the model gets an error
+    it can correct instead of a fake "ok".
+    """
+    candidates = ([target_id] if "." in target_id
+                  else [f"scene.{target_id}", f"script.{target_id}"])
+    for entity_id in candidates:
+        domain = entity_id.split(".", 1)[0]
+        if domain not in ("scene", "script"):
+            break
+        if await get_entity_state(entity_id) is not None:
+            return await call_ha_service(domain, "turn_on", {"entity_id": entity_id})
+    return {"status": "error",
+            "message": f"no scene or script named {target_id!r}"}
+
+
 async def get_entity_state(entity_id: str) -> str | None:
     """Read a single HA entity state."""
     data = await get_entity_state_details(entity_id)
@@ -372,11 +394,9 @@ async def execute_function(name: str, args: dict, room_lights: dict) -> dict:
             "available_rooms": available_rooms,
         }
 
-    elif name == "activate_scene":
-        return await call_ha_service("scene", "turn_on", {"entity_id": args["scene_id"]})
-
-    elif name == "run_script":
-        return await call_ha_service("script", "turn_on", {"entity_id": args["script_id"]})
+    elif name in ("activate_scene", "run_script"):
+        return await run_scene_or_script(
+            args.get("scene_id") or args.get("script_id") or "")
 
     elif name == "set_climate":
         entity_id = args["entity_id"]
