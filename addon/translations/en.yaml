@@ -35,6 +35,9 @@ configuration:
   ha_exposed_only:
     name: Only Assist-exposed entities
     description: When enabled, Gemini sees only entities exposed to Home Assistant Assist. This is recommended because it shrinks the prompt and avoids exposing private or technical entities.
+  quiet_confirmations:
+    name: Quiet confirmations
+    description: 'A successful plain device action (lights, scenes, scripts, climate, vacuum, cancelling a timer) is confirmed with a short chime instead of a spoken sentence. Errors, questions and new timers are still spoken.'
   debug_logging:
     name: Debug logging
     description: Enables detailed proxy, timing and audio-stream logs. Useful for diagnosis; leave disabled day to day because logs become large and noisy.

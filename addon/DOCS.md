@@ -114,11 +114,18 @@ Gemini Live model name. The default is:
 gemini-3.8-live
 ```
 
-On Gemini 3.8+ tools run asynchronously (`NON_BLOCKING`): the model ends its
-turn after the tool call and speaks the confirmation only once the real result
-is back. Before slow lookups (`search_web`, external services) it says a short
-filler such as "Już sprawdzam." Older models (`gemini-3.1-flash-live-preview`)
-still work and keep the blocking tool flow.
+Tools run asynchronously (`NON_BLOCKING`): the model ends its turn after the
+tool call and speaks the confirmation only once the real result is back. Before
+slow lookups (`search_web`, external services) it says a short filler such as
+"Już sprawdzam." Only Gemini 3.8+ Live models are supported.
+
+### `quiet_confirmations`
+
+When enabled, a successful plain device action (lights, scenes, scripts,
+climate, vacuum, cancelling a timer) is answered with a short chime instead of
+a spoken sentence: the tool result goes back with `scheduling: SILENT` and the
+session ends immediately. Errors, questions and new timers are still spoken.
+Default: `false`.
 
 ### `gemini_voice`
 

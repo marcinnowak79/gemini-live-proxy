@@ -22,6 +22,15 @@ export SYSTEM_PROMPT_TEMPLATE=$(bashio::config 'system_prompt_template')
 export ROOM_ALIASES_JSON=$(bashio::config 'room_aliases_json')
 export VACUUM_ENTITY_ID=$(bashio::config 'vacuum_entity_id')
 export HA_EXPOSED_ONLY=$(bashio::config 'ha_exposed_only')
+QUIET_CONFIRMATIONS_CONFIG=$(bashio::config 'quiet_confirmations')
+case "${QUIET_CONFIRMATIONS_CONFIG,,}" in
+    "1"|"true"|"yes"|"on")
+        export QUIET_CONFIRMATIONS="true"
+        ;;
+    *)
+        export QUIET_CONFIRMATIONS="false"
+        ;;
+esac
 DEBUG_LOGGING_CONFIG=$(bashio::config 'debug_logging')
 case "${DEBUG_LOGGING_CONFIG,,}" in
     "1"|"true"|"yes"|"on")

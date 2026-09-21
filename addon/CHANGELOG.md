@@ -2,6 +2,15 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.5.0
+
+- New option `quiet_confirmations`: successful plain device actions are
+  confirmed with a short chime instead of speech (tool result sent with
+  `scheduling: SILENT`, session ends right away). Errors, questions and new
+  timers are still spoken.
+- Gemini 3.8+ Live only: removed the legacy blocking tool flow for older
+  Live models.
+
 ## 1.4.0
 
 - Default Gemini model is now `gemini-3.8-live`.
