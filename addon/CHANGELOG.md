@@ -2,6 +2,17 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.6.0
+
+- Live device states in the prompt: a Home Assistant websocket subscription
+  keeps an in-memory state cache, so each command gets current on/off states
+  with zero added latency (no REST read on the command path). An unclear
+  "zapal/zgaś" now resolves toward the action that changes the state.
+- No-op detection: turning on something that was already on (or off) returns
+  `no_change` with a note, so the assistant says so and a misheard command is
+  noticed instead of silently "succeeding".
+- HA time context and the provider selector are now read in parallel.
+
 ## 1.5.0
 
 - New option `quiet_confirmations`: successful plain device actions are

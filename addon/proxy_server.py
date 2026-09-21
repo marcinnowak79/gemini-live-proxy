@@ -27,7 +27,8 @@ from dotenv import load_dotenv
 from google import genai
 
 from protocol import *
-from ha_client import get_exposed_entities, get_ha_context, execute_function, is_vacuum_enabled
+import ha_client
+from ha_client import get_exposed_entities, get_ha_context, execute_function, is_vacuum_enabled, get_device_states_context
 from ai_provider import create_session, resolve_provider
 from plugins import registry as plugin_registry
 from timer_manager import TimerManager
@@ -477,9 +478,13 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                     stream_stop_reason = "gemini_responding"
                 stop_streaming = True  # Stop sending mic audio to Gemini
 
-            current_ha_context = await get_ha_context()
+            # Both are small REST reads; run them side by side, not back to back.
+            current_ha_context, provider = await asyncio.gather(get_ha_context(), resolve_provider())
             recent_action_context = get_recent_action_context()
-            session_context = f"{current_ha_context or ''}{recent_action_context}"
+            # Device states come from the live websocket cache: no I/O here.
+            device_states_context = get_device_states_context()
+            session_context = f"{current_ha_context or ''}{device_states_context}{recent_action_context}"
+            debug_log(f"  [context] device states: {device_states_context.count(chr(10) + '- ')} entities")
             if current_ha_context:
                 debug_log(f"  [context] {current_ha_context.strip()}")
             else:
@@ -494,8 +499,7 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 remember_action(n, a, result)
                 return result
 
-            # resolved per session so the HA selector switches providers live
-            provider = await resolve_provider()
+            # provider is resolved per session (above) so the HA selector switches providers live
             print(f"  [stream] provider={provider}", flush=True)
 
             session = create_session(
@@ -821,7 +825,7 @@ async def run_local_test(entity_list, room_lights, local_area_id=""):
 
             current_ha_context = await get_ha_context()
             recent_action_context = get_recent_action_context()
-            session_context = f"{current_ha_context or ''}{recent_action_context}"
+            session_context = f"{current_ha_context or ''}{get_device_states_context()}{recent_action_context}"
             if current_ha_context:
                 print(f"  [context] {current_ha_context.strip()}", flush=True)
             else:
@@ -961,6 +965,7 @@ async def main():
     print(f"  Rooms: {list(room_lights.keys())}")
     print(f"  Local area: {local_area_id or 'none'}")
     plugin_registry.load()
+    asyncio.create_task(ha_client.run_state_cache(ha_client.EXPOSED_ENTITY_IDS))
     await timer_manager.start()
     if DEBUG_LOGGING:
         asyncio.create_task(event_loop_lag_monitor())

@@ -82,7 +82,7 @@ def is_quiet_success(name: str, result) -> bool:
     """A plain device action that clearly worked — nothing worth saying aloud."""
     if name not in QUIET_TOOLS or not isinstance(result, dict):
         return False
-    if result.get("status") != "ok":
+    if result.get("status") != "ok" or result.get("no_change"):
         return False
     # e.g. "cancel the timer" when none was running: let the model explain.
     return result.get("count", 1) != 0

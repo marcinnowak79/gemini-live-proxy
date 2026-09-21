@@ -19,6 +19,9 @@ LOCAL_AREA_ID = os.getenv("LOCAL_AREA_ID", "").strip()
 DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").lower() in ("1", "true", "yes", "on")
 
 
+EXPOSED_ENTITY_IDS: list[str] = []
+
+
 def debug_log(message: str):
     if DEBUG_LOGGING:
         print(message, flush=True)
@@ -146,6 +149,8 @@ async def get_exposed_entities() -> tuple[str, dict[str, list[str]], str]:
                     room_lights.setdefault(room, []).append(eid)
                     break
 
+    global EXPOSED_ENTITY_IDS
+    EXPOSED_ENTITY_IDS = [line[2:].split(" ", 1)[0] for line in lines]
     room_summary = {room: len(entities) for room, entities in sorted(room_lights.items())}
     debug_log(
         f"[ha] Loaded {len(lines)} actionable entities; local_area={local_area_id or 'none'}; room light groups: {room_summary}",
@@ -170,6 +175,102 @@ async def get_ha_context() -> str:
         return f"\nAktualny czas: {time_str}\nStrefa: {config['time_zone']}\nWspółrzędne: {lat:.2f}, {lon:.2f}\n"
     except Exception:
         return ""
+
+
+# ============================================================
+# Live state cache (HA websocket subscription)
+# ============================================================
+# Kept current by a background subscription so every command can read device
+# states with zero added latency — a REST /api/states read costs 80-140 ms.
+
+STATE_TRACKED_DOMAINS = {"light", "switch", "fan", "cover", "climate",
+                         "media_player", "vacuum", "input_boolean"}
+_live_states: dict[str, str] = {}
+_live_states_ready = False
+
+
+def _websocket_url() -> str:
+    base = HA_URL.rstrip("/")
+    ws = "ws" + base[4:] if base.startswith("http") else base
+    # Supervisor proxies Core's websocket at /core/websocket.
+    return ws + ("/websocket" if base.endswith("/core") else "/api/websocket")
+
+
+async def _subscribe_states_once(entity_ids: list[str]) -> None:
+    global _live_states_ready
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(_websocket_url(), heartbeat=30) as ws:
+            msg = await ws.receive_json()
+            if msg.get("type") != "auth_required":
+                raise RuntimeError(f"unexpected hello: {msg}")
+            await ws.send_json({"type": "auth", "access_token": HA_TOKEN})
+            msg = await ws.receive_json()
+            if msg.get("type") != "auth_ok":
+                raise RuntimeError(f"auth failed: {msg.get('type')}")
+            await ws.send_json({"id": 1, "type": "subscribe_entities", "entity_ids": entity_ids})
+            async for raw in ws:
+                if raw.type != aiohttp.WSMsgType.TEXT:
+                    if raw.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+                    continue
+                event = json.loads(raw.data).get("event")
+                if not event:
+                    continue
+                for entity_id, data in (event.get("a") or {}).items():
+                    _live_states[entity_id] = data.get("s")
+                for entity_id, diff in (event.get("c") or {}).items():
+                    new_state = (diff.get("+") or {}).get("s")
+                    if new_state is not None:
+                        _live_states[entity_id] = new_state
+                for entity_id in event.get("r") or []:
+                    _live_states.pop(entity_id, None)
+                if not _live_states_ready:
+                    _live_states_ready = True
+                    debug_log(f"[ha] Live state cache ready: {len(_live_states)} entities")
+
+
+async def run_state_cache(entity_ids: list[str]) -> None:
+    """Keep _live_states in sync forever; reconnects with backoff."""
+    global _live_states_ready
+    tracked = [e for e in entity_ids if e.split(".", 1)[0] in STATE_TRACKED_DOMAINS]
+    if not tracked:
+        return
+    delay = 1.0
+    while True:
+        try:
+            await _subscribe_states_once(tracked)
+            delay = 1.0
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - the cache is best-effort
+            print(f"[ha] State cache connection lost: {err}", flush=True)
+        _live_states_ready = False
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 30.0)
+
+
+def get_device_states_context() -> str:
+    """Current device states for the prompt, read from the live cache (no I/O)."""
+    if not _live_states_ready or not _live_states:
+        return ""
+    lines = [f"- {entity_id}: {state}" for entity_id, state in sorted(_live_states.items())]
+    return (
+        "\n=== AKTUALNY STAN URZĄDZEŃ ===\n"
+        + "\n".join(lines)
+        + "\nGdy polecenie jest niewyraźne co do włączenia/wyłączenia, wybierz akcję, "
+        "która zmienia obecny stan (np. „zgaś” świecącą lampę). Nie wywołuj narzędzia "
+        "tylko po to, żeby sprawdzić stan urządzenia z tej listy.\n"
+        "=== KONIEC STANU URZĄDZEŃ ===\n"
+    )
+
+
+def _already_in_state(entity_ids: list[str], action: str) -> bool:
+    """True when the cache says every target already was in the requested state."""
+    if action not in ("turn_on", "turn_off") or not _live_states_ready:
+        return False
+    expected = "on" if action == "turn_on" else "off"
+    states = [_live_states.get(entity_id) for entity_id in entity_ids]
+    return bool(states) and all(state == expected for state in states)
 
 
 async def call_ha_service(domain: str, service: str, data: dict) -> dict:
@@ -352,6 +453,7 @@ async def verify_entity_states(entity_ids: list[str], action: str) -> dict:
 async def call_and_verify_ha_service(action: str, entity_ids: str | list[str]) -> dict:
     """Call homeassistant action and verify final state where possible."""
     normalized = entity_ids if isinstance(entity_ids, list) else [entity_ids]
+    already = _already_in_state(normalized, action)
     result = await call_ha_service("homeassistant", action, {"entity_id": entity_ids})
     if result.get("status") != "ok":
         return result
@@ -359,6 +461,14 @@ async def call_and_verify_ha_service(action: str, entity_ids: str | list[str]) -
     verification = await verify_entity_states(normalized, action)
     if not verification.get("verified", False):
         return {"status": "error", **verification}
+    if already:
+        # A no-op usually means the command was misheard (e.g. "zapal" for
+        # "zgaś"); saying so lets the user notice and correct it.
+        state_word = "włączone" if action == "turn_on" else "wyłączone"
+        return {"status": "ok", "no_change": True,
+                "note": f"Urządzenie było już {state_word} przed poleceniem — nic się nie zmieniło. "
+                        "Powiedz to użytkownikowi.",
+                **verification}
     return {"status": "ok", **verification}
 
 
