@@ -21,7 +21,7 @@ ssh -p "$HA_SSH_PORT" -i "$HA_SSH_KEY" "$HA_SSH_USER@$HA_HOST"
 The add-on is installed as:
 
 ```text
-/addons/local/gemini-live-proxy
+/local_apps/local/gemini-live-proxy
 ```
 
 ## Important Supervisor behavior
@@ -69,7 +69,7 @@ git push origin main v<version>
 After GitHub Actions publishes the image:
 
 ```bash
-rsync -av --exclude __pycache__ -e "ssh -p $HA_SSH_PORT -i $HA_SSH_KEY -o BatchMode=yes" addon/ "$HA_SSH_USER@$HA_HOST:/addons/local/gemini-live-proxy/"
+rsync -av --exclude __pycache__ -e "ssh -p $HA_SSH_PORT -i $HA_SSH_KEY -o BatchMode=yes" addon/ "$HA_SSH_USER@$HA_HOST:/local_apps/local/gemini-live-proxy/"
 ssh -p "$HA_SSH_PORT" -i "$HA_SSH_KEY" "$HA_SSH_USER@$HA_HOST" 'ha store reload'
 ssh -p "$HA_SSH_PORT" -i "$HA_SSH_KEY" "$HA_SSH_USER@$HA_HOST" 'ha apps update local_gemini_live_proxy'
 ssh -p "$HA_SSH_PORT" -i "$HA_SSH_KEY" "$HA_SSH_USER@$HA_HOST" 'ha apps start local_gemini_live_proxy'
