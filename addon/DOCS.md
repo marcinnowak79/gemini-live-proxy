@@ -111,8 +111,14 @@ Do not share logs or screenshots that expose this value.
 Gemini Live model name. The default is:
 
 ```text
-gemini-3.1-flash-live-preview
+gemini-3.8-live
 ```
+
+On Gemini 3.8+ tools run asynchronously (`NON_BLOCKING`): the model ends its
+turn after the tool call and speaks the confirmation only once the real result
+is back. Before slow lookups (`search_web`, external services) it says a short
+filler such as "Już sprawdzam." Older models (`gemini-3.1-flash-live-preview`)
+still work and keep the blocking tool flow.
 
 ### `gemini_voice`
 

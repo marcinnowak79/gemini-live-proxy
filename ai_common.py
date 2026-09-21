@@ -123,8 +123,13 @@ def build_persona_prompt() -> str:
         )
     elif gender == "female":
         gender_instruction = (
-            f"Your name is {name}. You are female. If you refer to yourself, use feminine "
-            "grammatical forms where the response language requires gender."
+            f"Your name is {name}. You are female. If you refer to yourself, always use feminine "
+            "grammatical forms. In Polish, never describe yourself with masculine forms such as "
+            '"zrobiłem", "zgasiłem", "wyłączyłem", "włączyłem", "ustawiłem", "jestem gotowy", '
+            '"odpowiedziałem". Use feminine forms such as "zrobiłam", "zgasiłam", "wyłączyłam", '
+            '"włączyłam", "ustawiłam", "jestem gotowa", "odpowiedziałam". This applies to every '
+            "past-tense verb where you are the subject, including reports of actions you just "
+            'performed (e.g. "Wyłączyłam telewizor", "Zgasiłam światło w salonie").'
         )
     else:
         gender_instruction = (

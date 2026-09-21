@@ -2,6 +2,17 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.4.0
+
+- Default Gemini model is now `gemini-3.8-live`.
+- Async tool calls on Gemini 3.8+: tools are declared `NON_BLOCKING`, run in the
+  background, and the session keeps listening for the spoken follow-up turn
+  instead of ending at the first `turn_complete` (which would have gone silent).
+  The assistant confirms only after the real result arrives, and says a short
+  "Już sprawdzam." before slow lookups like `search_web`.
+- Female persona: explicit feminine Polish verb forms in the gender
+  instruction; gender-neutral OpenAI speech style prompt.
+
 ## 1.3.1
 
 - Fix silent no-ops when the model mixes up scenes and scripts:

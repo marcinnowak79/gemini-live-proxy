@@ -27,22 +27,48 @@ from ai_common import (  # noqa: F401 - re-exported for callers and tests
     web_search,
 )
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-live-preview")
+def _cfg(name: str, default: str) -> str:
+    """bashio hands unset add-on options through as the literal string "null"."""
+    value = os.getenv(name, "").strip()
+    return default if not value or value.lower() == "null" else value
+
+
+GEMINI_MODEL = _cfg("GEMINI_MODEL", "gemini-3.8-live")
 GEMINI_VOICE = os.getenv("GEMINI_VOICE", "Charon")
 RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION = float(os.getenv("RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION", "1.5"))
 RECEIVE_IDLE_TIMEOUT_AFTER_AUDIO = float(os.getenv("RECEIVE_IDLE_TIMEOUT_AFTER_AUDIO", "1.2"))
 RECEIVE_IDLE_TIMEOUT_GENERAL = float(os.getenv("RECEIVE_IDLE_TIMEOUT_GENERAL", "8.0"))
+# Async tools: the result is spoken in a fresh turn ~0.5-1s after we send it.
+RECEIVE_IDLE_TIMEOUT_AWAITING_REPLY = float(os.getenv("RECEIVE_IDLE_TIMEOUT_AWAITING_REPLY", "5.0"))
 GEMINI_SILENCE_DURATION_MS = int(os.getenv("GEMINI_SILENCE_DURATION_MS", "3000"))
 
+# Async tools make the model free to speak while a call runs, so it must be told
+# not to claim success before the result, and to cover slow lookups with a filler.
+ASYNC_TOOLS_PROMPT = (
+    "\n\nNarzędzia wykonują się w tle. Po wywołaniu narzędzia sterującego NIE potwierdzaj "
+    "wykonania, zanim dostaniesz wynik — potwierdź dopiero na podstawie wyniku. "
+    "Wyjątek: zanim wywołasz search_web albo inne narzędzie pobierające informacje z internetu "
+    "lub zewnętrznego serwisu, powiedz najpierw jedno bardzo krótkie zdanie, np. „Już sprawdzam.”, "
+    "a dopiero potem wywołaj narzędzie. Przy sterowaniu urządzeniami, scenami i timerami "
+    "nic nie mów przed wywołaniem."
+)
 
 
-def build_tools(room_keys: list[str], vacuum_enabled: bool = False) -> list:
+def supports_async_tools(model: str) -> bool:
+    """Gemini 3.8+ Live runs tools NON_BLOCKING; older Live models only block."""
+    return not any(tag in model for tag in ("gemini-2", "live-2", "gemini-3.0", "gemini-3.1"))
+
+
+def build_tools(room_keys: list[str], vacuum_enabled: bool = False,
+                async_tools: bool = False) -> list:
     """Adapt the shared tool catalogue to Gemini's FunctionDeclaration type."""
+    extra = {"behavior": types.Behavior.NON_BLOCKING} if async_tools else {}
     declarations = [
         types.FunctionDeclaration(
             name=spec["name"],
             description=spec["description"],
             parameters=spec["parameters"],
+            **extra,
         )
         for spec in build_tool_specs(room_keys, vacuum_enabled)
     ]
@@ -60,6 +86,8 @@ class GeminiSession:
                  on_responding: Callable | None = None,
                  vacuum_enabled: bool = False,
                  local_area_id: str = ""):
+        self.model = GEMINI_MODEL
+        self.async_tools = supports_async_tools(self.model)
         self.client = client
         self.entity_list = entity_list
         self.room_lights = room_lights
@@ -72,8 +100,9 @@ class GeminiSession:
         self.local_area_id = local_area_id
 
     def _build_prompt(self) -> str:
-        return build_prompt(self.entity_list, self.ha_context, self.history,
-                            self.local_area_id)
+        prompt = build_prompt(self.entity_list, self.ha_context, self.history,
+                              self.local_area_id)
+        return prompt + ASYNC_TOOLS_PROMPT if self.async_tools else prompt
 
     async def stream_audio(
         self,
@@ -96,7 +125,7 @@ class GeminiSession:
                 language_code=ASSISTANT_LANGUAGE,
             ),
             system_instruction=types.Content(parts=[types.Part(text=prompt)]),
-            tools=build_tools(room_keys, self.vacuum_enabled),
+            tools=build_tools(room_keys, self.vacuum_enabled, self.async_tools),
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             realtime_input_config=types.RealtimeInputConfig(
@@ -114,7 +143,8 @@ class GeminiSession:
         response_text = ""
         t0 = time.monotonic()
 
-        async with self.client.aio.live.connect(model=GEMINI_MODEL, config=config) as session:
+        debug_log(f"  [gemini] model={self.model} async_tools={self.async_tools}")
+        async with self.client.aio.live.connect(model=self.model, config=config) as session:
             response_audio_chunks = []
             input_transcript_parts = []
             output_transcript_parts = []
@@ -147,15 +177,49 @@ class GeminiSession:
                 finally:
                     send_done = True
 
-            # Task 2: Receive responses from Gemini (runs until turn_complete)
+            # Task 2: Receive responses from Gemini (runs until the last turn completes)
             responding_signaled = False
+            tool_tasks: set[asyncio.Task] = set()
+            # Async (NON_BLOCKING) tools: the model ends its turn right after the tool
+            # call and speaks the result in a NEW turn once we send the response. Track
+            # when the last response went out and when audio last arrived, so a
+            # turn_complete only ends the session when no spoken follow-up is still owed.
+            reply_owed = False
+            last_response_at = 0.0
+            last_audio_at = 0.0
+
+            async def run_tools(function_calls):
+                nonlocal reply_owed, last_response_at
+                responses = []
+                for fc in function_calls:
+                    args_dict = dict(fc.args)
+                    try:
+                        if fc.name == "search_web":
+                            result = await self._do_search(args_dict.get("query", ""))
+                        else:
+                            result = await self.on_function_call(fc.name, args_dict)
+                    except Exception as e:  # noqa: BLE001 - the model must still get an answer
+                        print(f"  [gemini] TOOL ERROR {fc.name}: {e}", flush=True)
+                        result = {"error": str(e)}
+                    responses.append(types.FunctionResponse(
+                        id=fc.id, name=fc.name, response=result,
+                    ))
+                await session.send_tool_response(function_responses=responses)
+                debug_log(f"  [gemini] Tool response sent ({(time.monotonic()-t0)*1000:.0f}ms)")
+                if self.async_tools:
+                    reply_owed = True
+                    last_response_at = time.monotonic()
 
             async def receive_response():
-                nonlocal responding_signaled
+                nonlocal responding_signaled, reply_owed, last_audio_at
                 try:
                     messages = session.receive().__aiter__()
                     while True:
-                        if function_calls_list and response_audio_chunks:
+                        if tool_tasks:
+                            idle_timeout = RECEIVE_IDLE_TIMEOUT_GENERAL
+                        elif reply_owed:
+                            idle_timeout = RECEIVE_IDLE_TIMEOUT_AWAITING_REPLY
+                        elif function_calls_list and response_audio_chunks:
                             idle_timeout = RECEIVE_IDLE_TIMEOUT_AFTER_AUDIO
                         elif function_calls_list:
                             idle_timeout = RECEIVE_IDLE_TIMEOUT_AFTER_FUNCTION
@@ -166,10 +230,15 @@ class GeminiSession:
                         except asyncio.TimeoutError:
                             debug_log(
                                 f"  [gemini] Receive idle timeout after {idle_timeout:.1f}s "
-                                f"(functions={function_calls_list}, audio_chunks={len(response_audio_chunks)})"
+                                f"(functions={function_calls_list}, audio_chunks={len(response_audio_chunks)}, "
+                                f"pending_tools={len(tool_tasks)}, reply_owed={reply_owed})"
                             )
                             break
                         except StopAsyncIteration:
+                            # The SDK's receive() iterator ends at every turn_complete.
+                            if tool_tasks or reply_owed:
+                                messages = session.receive().__aiter__()
+                                continue
                             break
 
                         msg_fields = [
@@ -179,6 +248,11 @@ class GeminiSession:
                                 "go_away", "session_resumption_update",
                             ) if getattr(message, n, None) is not None
                         ]
+                        if message.server_content is not None:
+                            msg_fields += [
+                                n for n in ("generation_complete", "turn_complete", "interrupted")
+                                if getattr(message.server_content, n, None)
+                            ]
                         debug_log(
                             f"  [gemini] msg fields={msg_fields} "
                             f"({(time.monotonic()-t0)*1000:.0f}ms, responding={responding_signaled})"
@@ -200,10 +274,25 @@ class GeminiSession:
                                 for part in sc.model_turn.parts:
                                     if part.inline_data:
                                         response_audio_chunks.append(part.inline_data.data)
+                                        last_audio_at = time.monotonic()
                                         await on_audio_out(part.inline_data.data)
                                     elif part.text:
                                         response_text_parts.append(part.text)
-                            if sc.turn_complete:
+                            # 3.8 sends turn_complete only once the audio would have finished
+                            # playing (seconds late); generation_complete means every chunk is
+                            # already here, so async sessions can end on it.
+                            turn_done = sc.turn_complete or (self.async_tools and sc.generation_complete)
+                            if turn_done:
+                                # Speech after the last tool response is the follow-up to it
+                                # (a filler like "Już sprawdzam." comes before, so it doesn't count).
+                                if reply_owed and last_audio_at > last_response_at:
+                                    reply_owed = False
+                                if tool_tasks or reply_owed:
+                                    debug_log(
+                                        f"  [gemini] Turn complete, awaiting tool follow-up "
+                                        f"({(time.monotonic()-t0)*1000:.0f}ms)"
+                                    )
+                                    continue
                                 break
 
                         tc = message.tool_call
@@ -213,21 +302,23 @@ class GeminiSession:
                                 if self.on_responding:
                                     self.on_responding()
                                 debug_log(f"  [gemini] Tool call received, stopping mic ({(time.monotonic()-t0)*1000:.0f}ms)")
-                            responses = []
                             for fc in tc.function_calls:
-                                args_dict = dict(fc.args)
                                 debug_log(f"  [gemini] FC: {fc.name}({fc.args})")
-                                function_calls_list.append(f"{fc.name}({args_dict})")
-                                if fc.name == "search_web":
-                                    result = await self._do_search(args_dict.get("query", ""))
-                                else:
-                                    result = await self.on_function_call(fc.name, args_dict)
-                                responses.append(types.FunctionResponse(
-                                    id=fc.id, name=fc.name, response=result,
-                                ))
-                            await session.send_tool_response(function_responses=responses)
+                                function_calls_list.append(f"{fc.name}({dict(fc.args)})")
+                            if self.async_tools:
+                                # Run in the background so audio already queued behind the
+                                # call (e.g. "Już sprawdzam.") keeps streaming meanwhile.
+                                task = asyncio.create_task(run_tools(tc.function_calls))
+                                tool_tasks.add(task)
+                                task.add_done_callback(tool_tasks.discard)
+                            else:
+                                await run_tools(tc.function_calls)
                 except Exception as e:
                     print(f"  [gemini] RECEIVE ERROR: {e}", flush=True)
+                finally:
+                    if tool_tasks:
+                        # Never abandon a half-run HA action just because the model went quiet.
+                        await asyncio.wait(set(tool_tasks), timeout=10)
 
             response_text_parts = []
             function_calls_list = []
