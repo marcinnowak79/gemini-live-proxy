@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import time
 
 import aiohttp
 from dotenv import load_dotenv
@@ -187,6 +188,18 @@ STATE_TRACKED_DOMAINS = {"light", "switch", "fan", "cover", "climate",
                          "media_player", "vacuum", "input_boolean"}
 _live_states: dict[str, str] = {}
 _live_states_ready = False
+# Replaced (after being set) on every cache update, so a waiter holding the
+# current event wakes on the next state change without polling.
+_live_states_changed = asyncio.Event()
+# How long to wait for the websocket to report the new state before one final
+# REST read decides. The old fixed poll schedule gave up after ~2.2 s.
+VERIFY_TIMEOUT_SECONDS = float(os.getenv("HA_VERIFY_TIMEOUT_SECONDS", "2.5"))
+
+
+def _notify_live_states_changed() -> None:
+    global _live_states_changed
+    _live_states_changed.set()
+    _live_states_changed = asyncio.Event()
 
 
 def _websocket_url() -> str:
@@ -224,6 +237,7 @@ async def _subscribe_states_once(entity_ids: list[str]) -> None:
                         _live_states[entity_id] = new_state
                 for entity_id in event.get("r") or []:
                     _live_states.pop(entity_id, None)
+                _notify_live_states_changed()
                 if not _live_states_ready:
                     _live_states_ready = True
                     debug_log(f"[ha] Live state cache ready: {len(_live_states)} entities")
@@ -352,6 +366,17 @@ async def get_entity_state_details(entity_id: str) -> dict:
         return await _read_entity_state(session, entity_id)
 
 
+async def _read_states(entity_ids: list[str]) -> dict[str, str | None]:
+    """Read several states over one connection, in parallel; None on failure."""
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(
+            *(_read_entity_state(session, e) for e in entity_ids))
+    return {
+        e: r.get("state") if r.get("status") == "ok" else None
+        for e, r in zip(entity_ids, results)
+    }
+
+
 async def get_printer_status() -> dict:
     """Read the key Prusa printer status sensors in one call."""
     entity_ids = {
@@ -424,24 +449,52 @@ async def get_room_state(room: str, room_lights: dict) -> dict:
 async def verify_entity_states(entity_ids: list[str], action: str) -> dict:
     """Verify HA state after a switch/light action."""
     if action not in ("turn_on", "turn_off"):
-        states = {entity_id: await get_entity_state(entity_id) for entity_id in entity_ids}
+        states = await _read_states(entity_ids)
         debug_log(f"[ha] Post-action states for {action}: {states}")
         return {"verified": True, "states": states}
 
     expected = "on" if action == "turn_on" else "off"
-    for delay in (0.3, 0.7, 1.2):
-        await asyncio.sleep(delay)
-        states = {entity_id: await get_entity_state(entity_id) for entity_id in entity_ids}
-        mismatched = {
-            entity_id: state
-            for entity_id, state in states.items()
-            if state is not None and state != expected
-        }
-        if not mismatched:
-            debug_log(f"[ha] Verified {action}: {states}")
-            return {"verified": True, "expected": expected, "states": states}
+    t0 = time.monotonic()
 
-    print(f"[ha] Verification failed for {action}: expected={expected}, states={states}", flush=True)
+    def matches(states: dict) -> bool:
+        return all(state is None or state == expected for state in states.values())
+
+    # Fast path: the websocket cache sees the new state the moment HA does, so
+    # wait for it instead of sleeping and polling REST (0.3 s floor + 80-140 ms
+    # per entity read). Entities outside the cache fall through to REST.
+    if _live_states_ready and all(e in _live_states for e in entity_ids):
+        deadline = t0 + VERIFY_TIMEOUT_SECONDS
+        while True:
+            changed = _live_states_changed
+            states = {e: _live_states.get(e) for e in entity_ids}
+            if matches(states):
+                print(f"[ha] Verified {action} of {len(entity_ids)} via cache in "
+                      f"{(time.monotonic() - t0) * 1000:.0f}ms", flush=True)
+                return {"verified": True, "expected": expected, "states": states}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(changed.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+        # The cache may lag or have dropped; one REST read has the final say.
+        states = await _read_states(entity_ids)
+        if matches(states):
+            print(f"[ha] Verified {action} of {len(entity_ids)} via REST after cache timeout in "
+                  f"{(time.monotonic() - t0) * 1000:.0f}ms", flush=True)
+            return {"verified": True, "expected": expected, "states": states}
+    else:
+        for delay in (0.3, 0.7, 1.2):
+            await asyncio.sleep(delay)
+            states = await _read_states(entity_ids)
+            if matches(states):
+                print(f"[ha] Verified {action} of {len(entity_ids)} via REST polling in "
+                      f"{(time.monotonic() - t0) * 1000:.0f}ms", flush=True)
+                return {"verified": True, "expected": expected, "states": states}
+
+    print(f"[ha] Verification failed for {action} after {(time.monotonic() - t0) * 1000:.0f}ms: "
+          f"expected={expected}, states={states}", flush=True)
     return {
         "verified": False,
         "expected": expected,

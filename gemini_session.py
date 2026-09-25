@@ -221,19 +221,21 @@ class GeminiSession:
 
             async def run_tools(function_calls):
                 nonlocal reply_owed, last_response_at, tools_running
+                async def run_one(fc):
+                    args_dict = dict(fc.args)
+                    try:
+                        if fc.name == "search_web":
+                            return await self._do_search(args_dict.get("query", ""))
+                        return await self.on_function_call(fc.name, args_dict)
+                    except Exception as e:  # noqa: BLE001 - the model must still get an answer
+                        print(f"  [gemini] TOOL ERROR {fc.name}: {e}", flush=True)
+                        return {"status": "error", "message": str(e)}
+
                 try:
-                    results = []
-                    for fc in function_calls:
-                        args_dict = dict(fc.args)
-                        try:
-                            if fc.name == "search_web":
-                                result = await self._do_search(args_dict.get("query", ""))
-                            else:
-                                result = await self.on_function_call(fc.name, args_dict)
-                        except Exception as e:  # noqa: BLE001 - the model must still get an answer
-                            print(f"  [gemini] TOOL ERROR {fc.name}: {e}", flush=True)
-                            result = {"status": "error", "message": str(e)}
-                        results.append((fc, result))
+                    # Calls in one batch (e.g. two rooms at once) run in parallel, so
+                    # the reply waits for the slowest one, not for their sum.
+                    results = list(zip(function_calls, await asyncio.gather(
+                        *(run_one(fc) for fc in function_calls))))
                     quiet = QUIET_CONFIRMATIONS and all(is_quiet_success(fc.name, r) for fc, r in results)
                     extra = {"scheduling": types.FunctionResponseScheduling.SILENT} if quiet else {}
                     await session.send_tool_response(function_responses=[

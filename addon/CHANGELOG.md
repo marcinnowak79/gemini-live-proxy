@@ -2,6 +2,19 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.7.0
+
+- Faster on/off confirmation: after a light/switch action the add-on now waits
+  for the new state on the existing websocket state cache instead of sleeping
+  0.3 s and polling REST entity by entity. A confirmation lands as soon as the
+  device reports. If the cache stays silent for `HA_VERIFY_TIMEOUT_SECONDS`
+  (default 2.5 s), one REST read decides. Entities outside the cache keep the
+  old poll schedule, but read in parallel.
+- Several tool calls in one Gemini batch (e.g. two rooms at once) run in
+  parallel instead of one after another.
+- Each verification logs its path and duration (`[ha] Verified ... via cache
+  in N ms`) for before/after measurements.
+
 ## 1.6.0
 
 - Live device states in the prompt: a Home Assistant websocket subscription
