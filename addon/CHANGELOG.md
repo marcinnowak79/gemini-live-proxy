@@ -2,6 +2,16 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.8.3
+
+- Gemini Live input transcription is locked to the assistant language
+  (`language_codes=[pl-PL]`), which google-genai now accepts on the Developer
+  API. Left to auto-detection it labelled Polish commands as Hindi, German or
+  Portuguese, and that also hurt the model's own understanding: on 384 real
+  recordings correct actions rose from 84.9% to 90.6% and swapped on/off fell
+  from 22 to 8. Override with `GEMINI_TRANSCRIPTION_LANGUAGE` (`auto` restores
+  detection).
+
 ## 1.8.2
 
 - Records XMOS diagnostics sent by the matching Voice PE firmware: channel 1

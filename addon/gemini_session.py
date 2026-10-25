@@ -41,6 +41,17 @@ RECEIVE_IDLE_TIMEOUT_GENERAL = float(os.getenv("RECEIVE_IDLE_TIMEOUT_GENERAL", "
 # Tools are async: the result is spoken in a fresh turn ~0.5-1s after we send it.
 RECEIVE_IDLE_TIMEOUT_AWAITING_REPLY = float(os.getenv("RECEIVE_IDLE_TIMEOUT_AWAITING_REPLY", "5.0"))
 GEMINI_SILENCE_DURATION_MS = int(os.getenv("GEMINI_SILENCE_DURATION_MS", "3000"))
+# Language of the input transcription. Left to auto-detection it labelled Polish
+# commands as Hindi, German or Portuguese; the Developer API rejected
+# language_codes until google-genai ~2.3x, and accepts it now. "auto" restores
+# detection.
+TRANSCRIPTION_LANGUAGE = _cfg("GEMINI_TRANSCRIPTION_LANGUAGE", ASSISTANT_LANGUAGE)
+
+
+def input_transcription_config() -> types.AudioTranscriptionConfig:
+    if TRANSCRIPTION_LANGUAGE.lower() in ("auto", "none", "off"):
+        return types.AudioTranscriptionConfig()
+    return types.AudioTranscriptionConfig(language_codes=[TRANSCRIPTION_LANGUAGE])
 # Quiet confirmations: a successful plain device action is
 # acknowledged with a short chime instead of a spoken sentence.
 QUIET_CONFIRMATIONS = os.getenv("QUIET_CONFIRMATIONS", "false").lower() in ("1", "true", "yes", "on")
@@ -152,7 +163,7 @@ class GeminiSession:
             ),
             system_instruction=types.Content(parts=[types.Part(text=prompt)]),
             tools=build_tools(room_keys, self.vacuum_enabled),
-            input_audio_transcription=types.AudioTranscriptionConfig(),
+            input_audio_transcription=input_transcription_config(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             realtime_input_config=types.RealtimeInputConfig(
                 # Manual activity detection: the proxy already runs its own VAD and cuts the
