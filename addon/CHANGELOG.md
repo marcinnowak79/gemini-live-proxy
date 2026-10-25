@@ -2,6 +2,18 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.8.1
+
+- Pipeline: one text-model round per command instead of two. The confirmation
+  of a plain action now comes in a `say` field of the tool call itself, which
+  the model fills reliably, where free text next to a call was often left out.
+  First audio after the end of speech dropped from about 2.8 s to about 2.1 s.
+- Pipeline: enum arguments with stray punctuation (e.g. `turn_off,`) are
+  snapped back onto their allowed values before reaching Home Assistant.
+- One Gemini client for the whole process instead of one per Voice PE
+  connection (the device reconnects for every command), and the pipeline opens
+  its HTTPS connections while the user is still speaking.
+
 ## 1.8.0
 
 - Silero voice activity detection. The microphone stream is now judged by a

@@ -92,6 +92,19 @@ _plugin_token_raw = os.getenv("PLUGIN_API_TOKEN", "").strip()
 PLUGIN_API_TOKEN = "" if _plugin_token_raw.lower() == "null" else _plugin_token_raw
 
 
+# One client for the whole process. The Voice PE reconnects for every command,
+# and a client per connection threw away its warm HTTPS connections each time,
+# so every pipeline command paid fresh TLS handshakes to Google.
+_gemini_client: genai.Client | None = None
+
+
+def shared_gemini_client() -> genai.Client:
+    global _gemini_client
+    if _gemini_client is None:
+        _gemini_client = genai.Client(api_key=API_KEY)
+    return _gemini_client
+
+
 def debug_log(message: str):
     if DEBUG_LOGGING:
         print(message, flush=True)
@@ -347,7 +360,7 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
     """Handle one ESP32 client connection."""
     debug_log(f"[proxy] ESP32 connected: {websocket.remote_address}")
 
-    client = genai.Client(api_key=API_KEY)
+    client = shared_gemini_client()
 
     first_chunk_sent = False
     audio_session: ResponseAudioSession | None = None
@@ -802,7 +815,7 @@ async def run_local_test(entity_list, room_lights, local_area_id=""):
     import numpy as np
     import sounddevice as sd
 
-    client = genai.Client(api_key=API_KEY)
+    client = shared_gemini_client()
     print(f"\n🎤 Local test mode")
     print(f"Voice: {VOICE}")
     print(f"Entities: {len(entity_list.splitlines())}")

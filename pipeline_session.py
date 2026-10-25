@@ -48,6 +48,7 @@ TTS_MODEL = _cfg("PIPELINE_TTS_MODEL", "gemini-3.8-flash-lite-tts")
 TTS_VOICE = _cfg("PIPELINE_TTS_VOICE", _cfg("GEMINI_VOICE", "Charon"))
 MIN_SPEECH_MS = int(_cfg("PIPELINE_MIN_SPEECH_MS", "300"))
 MAX_TOOL_ROUNDS = 3
+SAY_FIELD = "say"
 
 # Kept open between commands: a fresh TLS handshake to the STT endpoint costs
 # a noticeable slice of the latency budget on every utterance.
@@ -66,8 +67,8 @@ Dostajesz tekst rozpoznany z mowy użytkownika; może zawierać drobne błędy r
 zinterpretuj go jako najbardziej prawdopodobne polecenie po polsku. Twoja odpowiedź tekstowa
 zostanie przeczytana na głos, więc pisz krótko, naturalnie, bez list i formatowania,
 liczby słownie gdy to naturalne.
-Przy sterowaniu urządzeniami, scenami, skryptami i klimatyzacją wywołaj narzędzie i w tej samej
-odpowiedzi dopisz bardzo krótkie potwierdzenie (np. „Gaszę lampkę na biurku.”).
+Przy sterowaniu urządzeniami, scenami, skryptami i klimatyzacją wywołaj narzędzie i wypełnij jego
+pole "say" bardzo krótkim potwierdzeniem (np. „Gaszę lampkę na biurku.”).
 Przy pytaniach (stan urządzeń, wyszukiwanie, minutniki, parking) najpierw wywołaj narzędzie,
 odpowiedź podaj dopiero na podstawie wyniku.
 Jeśli tekst nie jest poleceniem ani pytaniem do Ciebie (urywek rozmowy, szum), nie wywołuj
@@ -84,6 +85,25 @@ def _vocabulary(entity_list: str) -> str:
         if m:
             labels.update(p.strip() for p in m.group(1).split(", ") if "=" not in p)
     return ", ".join(sorted(labels))
+
+
+def _fit_enums(args: dict, spec: dict | None) -> dict:
+    """Snap enum arguments back onto their allowed values.
+
+    The text model occasionally returns a value with stray punctuation, e.g.
+    action="turn_off," — which Home Assistant would reject outright.
+    """
+    props = (spec or {}).get("parameters", {}).get("properties", {})
+    fixed = dict(args)
+    for key, value in args.items():
+        allowed = props.get(key, {}).get("enum")
+        if not allowed or not isinstance(value, str) or value in allowed:
+            continue
+        cleaned = value.strip().strip(".,;:!?\"' ").lower()
+        if cleaned in allowed:
+            print(f"  [pipeline] fixed {key}={value!r} -> {cleaned!r}", flush=True)
+            fixed[key] = cleaned
+    return fixed
 
 
 def _wav_bytes(pcm: bytes) -> bytes:
@@ -151,6 +171,10 @@ class PipelineSession:
 
         Returns a summary of what happened, for conversation history.
         """
+        # The user is still speaking: open the connections now so the handshakes
+        # overlap the utterance instead of following it.
+        # Left running if the user is quicker: a half-open handshake still saves time.
+        asyncio.create_task(self._warm_up())
         pcm = b"".join([chunk async for chunk in audio_chunks])
         t0 = time.monotonic()
         if self.on_responding:
@@ -188,6 +212,24 @@ class PipelineSession:
             summary = f"{summary} {answer}".strip()
         return f"(usłyszano: {text}) {summary}".strip() if summary else ""
 
+    async def _warm_up(self) -> None:
+        """Cheap authenticated requests that leave HTTPS connections open for reuse."""
+        async def openai():
+            if OPENAI_API_KEY:
+                async with _http_session().get(
+                    "https://api.openai.com/v1/models/" + STT_MODEL,
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                ) as resp:
+                    await resp.read()
+
+        async def google():
+            await self.client.aio.models.get(model=LLM_MODEL)
+
+        results = await asyncio.gather(openai(), google(), return_exceptions=True)
+        for err in results:
+            if isinstance(err, Exception):
+                debug_log(f"  [pipeline] warm-up failed: {type(err).__name__}: {err}")
+
     async def _transcribe(self, pcm: bytes) -> str:
         if not OPENAI_API_KEY:
             print("  [pipeline] ERROR: openai_api_key is required for transcription", flush=True)
@@ -217,6 +259,16 @@ class PipelineSession:
 
     def _model_config(self) -> types.GenerateContentConfig:
         specs = build_tool_specs(list(self.room_lights.keys()), self.vacuum_enabled)
+        self._specs = {spec["name"]: spec for spec in specs}
+        for spec in specs:
+            if spec["name"] not in QUERY_TOOLS:
+                # Text written alongside a function call is often left out; a field of
+                # the call itself is not, so the confirmation needs no second round trip.
+                spec["parameters"] = {**spec["parameters"], "properties": {
+                    **spec["parameters"].get("properties", {}),
+                    SAY_FIELD: {"type": "string", "description":
+                                "Bardzo krótkie potwierdzenie po polsku do powiedzenia na głos."},
+                }}
         prompt = build_prompt(self.entity_list, self.ha_context, self.history,
                               self.local_area_id) + PIPELINE_PROMPT
         thinking = (types.ThinkingConfig(thinking_budget=0) if LLM_MODEL.startswith("gemini-2.5")
@@ -230,7 +282,8 @@ class PipelineSession:
         )
 
     async def _call_tool(self, fc) -> dict:
-        args = dict(fc.args or {})
+        args = _fit_enums({k: v for k, v in (fc.args or {}).items() if k != SAY_FIELD},
+                          self._specs.get(fc.name))
         try:
             if fc.name == "search_web":
                 return await web_search(args.get("query", ""), self.client)
@@ -246,12 +299,14 @@ class PipelineSession:
         contents = [types.Content(role="user", parts=[types.Part(text=text)])]
         made: list[str] = []
         for _ in range(MAX_TOOL_ROUNDS):
+            t_llm = time.monotonic()
             try:
                 resp = await self.client.aio.models.generate_content(
                     model=LLM_MODEL, contents=contents, config=config)
             except Exception as err:  # noqa: BLE001
                 print(f"  [pipeline] LLM ERROR: {type(err).__name__}: {err}", flush=True)
                 return "", made
+            print(f"  [pipeline] llm={1000 * (time.monotonic() - t_llm):.0f}ms", flush=True)
             calls = resp.function_calls or []
             parts = (resp.candidates[0].content.parts if resp.candidates and resp.candidates[0].content
                      else None) or []
@@ -262,8 +317,13 @@ class PipelineSession:
                 return said, made
 
             for fc in calls:
-                debug_log(f"  [pipeline] FC: {fc.name}({dict(fc.args or {})})")
-                made.append(f"{fc.name}({dict(fc.args or {})})")
+                args = _fit_enums({k: v for k, v in (fc.args or {}).items() if k != SAY_FIELD},
+                                  self._specs.get(fc.name))
+                debug_log(f"  [pipeline] FC: {fc.name}({args})")
+                made.append(f"{fc.name}({args})")
+            if not said:
+                said = " ".join(str(fc.args[SAY_FIELD]).strip() for fc in calls
+                                if fc.args and fc.args.get(SAY_FIELD)).strip()
 
             # A plain action comes with its confirmation already written. Synthesise it
             # while Home Assistant carries the action out, but hold the audio back
@@ -293,10 +353,15 @@ class PipelineSession:
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=TTS_VOICE))),
         )
+        t_tts = time.monotonic()
+        first = True
         try:
             stream = await self.client.aio.models.generate_content_stream(
                 model=TTS_MODEL, contents=text, config=config)
             async for chunk in stream:
+                if first:
+                    first = False
+                    debug_log(f"  [pipeline] tts first chunk {1000 * (time.monotonic() - t_tts):.0f}ms")
                 for cand in chunk.candidates or []:
                     for part in (cand.content.parts if cand.content else None) or []:
                         if part.inline_data and part.inline_data.data:
