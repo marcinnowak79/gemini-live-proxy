@@ -28,6 +28,7 @@ from google import genai
 
 from protocol import *
 import ha_client
+import speech_vad
 from ha_client import get_exposed_entities, get_ha_context, execute_function, is_vacuum_enabled, get_device_states_context
 from ai_provider import create_session, resolve_provider
 from plugins import registry as plugin_registry
@@ -50,6 +51,21 @@ MIC_MAX_STREAM_MS = int(os.getenv("MIC_MAX_STREAM_MS", "7000"))
 # Min consecutive above-threshold chunks to count as real speech (ignore lone crackles
 # that would otherwise keep resetting the end-of-speech timer and run to MAX_STREAM).
 MIC_VOICE_RUN_MIN = int(os.getenv("MIC_VOICE_RUN_MIN", "2"))
+# "silero" (neural speech detector) or "rms" (the loudness threshold above). Silero
+# tells speech from noise at any volume, so it can end an utterance after a much
+# shorter silence: on 384 real recordings a 1.0 s gap almost only ever followed a
+# finished command, while the loudness detector needed 1.8 s to be safe.
+
+
+def _option(name: str, default: str) -> str:
+    """bashio hands options missing from the saved config through as the string "null"."""
+    value = os.getenv(name, "").strip()
+    return default if not value or value.lower() == "null" else value
+
+
+VAD_ENGINE = _option("VAD_ENGINE", "silero").lower()
+VAD_SILENCE_TIMEOUT_MS = int(_option("VAD_SILENCE_TIMEOUT_MS", "1000"))
+USE_SILERO = VAD_ENGINE == "silero" and speech_vad.available()
 SESSION_TIMEOUT_SECONDS = float(os.getenv("SESSION_TIMEOUT_SECONDS", "30"))
 GEMINI_RETRY_TIMEOUT_SECONDS = float(os.getenv("GEMINI_RETRY_TIMEOUT_SECONDS", "10"))
 GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "0"))
@@ -492,6 +508,9 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             if recent_action_context:
                 debug_log(f"  [context] {recent_action_context.strip()}")
 
+            # Filled in while the mic streams; the pipeline backend gates on it.
+            stream_stats = {"speech_ms": 0}
+
             async def handle_function_call_for_session(n, a):
                 nonlocal function_call_seen
                 function_call_seen = True
@@ -514,6 +533,7 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 on_responding=on_gemini_responding,
                 vacuum_enabled=is_vacuum_enabled(),
                 local_area_id=local_area_id,
+                stream_stats=stream_stats,
             )
 
             async def realtime_audio_stream():
@@ -529,6 +549,8 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 rms_max = 0.0
                 noise_floor = MIC_RMS_INITIAL_NOISE
                 speech_threshold = MIC_RMS_MIN_SPEECH
+                stream_vad = speech_vad.StreamVAD() if USE_SILERO else None
+                silence_timeout_ms = VAD_SILENCE_TIMEOUT_MS if stream_vad else MIC_SILENCE_TIMEOUT_MS
 
                 # Keep streaming until Gemini responds (stop_streaming set by receive task)
                 try:
@@ -536,7 +558,7 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                         now = time.monotonic()
                         elapsed_ms = (now - stream_started) * 1000
                         silence_ms = (now - last_voice) * 1000
-                        if speech_started and silence_ms >= MIC_SILENCE_TIMEOUT_MS:
+                        if speech_started and silence_ms >= silence_timeout_ms:
                             stream_stop_reason = "local_vad_silence"
                             debug_log(
                                 f"  [stream] Local VAD end after {silence_ms:.0f}ms silence "
@@ -581,7 +603,11 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                             peak_max = max(peak_max, peak)
                             rms_max = max(rms_max, rms)
                             speech_threshold = max(MIC_RMS_MIN_SPEECH, noise_floor * MIC_RMS_SPEECH_RATIO)
-                            is_voice = rms >= speech_threshold
+                            if stream_vad is not None:
+                                is_voice = stream_vad.feed(pcm) >= speech_vad.THRESHOLD
+                                stream_stats["speech_ms"] = stream_vad.speech_ms
+                            else:
+                                is_voice = rms >= speech_threshold
                             if is_voice:
                                 voice_run += 1
                                 # A lone above-threshold chunk (household crackle/click) must
@@ -626,6 +652,7 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                             )
                     debug_log(
                         f"  [stream] Sent {chunk_count} chunks, {total_bytes}B mono16, "
+                        f"vad={'silero' if stream_vad else 'rms'}, speech={stream_stats['speech_ms']}ms, "
                         f"peak={peak_max}, rms={rms_max:.0f}, noise={noise_floor:.0f}, "
                         f"threshold={speech_threshold:.0f}, dropped={dropped_audio_messages}, "
                         f"reader_msgs={reader_message_count}, max_reader_gap={reader_max_gap_ms:.0f}ms, "
@@ -849,6 +876,7 @@ async def run_local_test(entity_list, room_lights, local_area_id=""):
                 voice=VOICE,
                 vacuum_enabled=is_vacuum_enabled(),
                 local_area_id=local_area_id,
+                stream_stats=stream_stats,
             )
 
             summary = await session.stream_audio(

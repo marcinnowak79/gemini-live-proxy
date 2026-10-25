@@ -65,6 +65,24 @@ configuration:
   timer_alarm_repeat_interval_seconds:
     name: Alarm repeat interval
     description: How often, in seconds, the timer alarm repeats until the user stops it. Lower values are more insistent; higher values are less intrusive.
+  vad_engine:
+    name: Detektor mowy
+    description: Opcja silero to mały neuronowy detektor mowy, który odróżnia mowę od szumu niezależnie od głośności — koniec komendy jest wykrywany szybciej, a hałas nie rozpoczyna ani nie przedłuża nagrania. "rms" to stary próg głośności.
+  vad_silence_timeout_ms:
+    name: Cisza kończąca komendę (Silero)
+    description: Ile milisekund ciszy po mowie kończy nagranie przy detektorze Silero. 1000 ms sprawdziło się na prawdziwych nagraniach; zwiększ, jeśli długie pauzy w środku komendy ją ucinają. mic_silence_timeout_ms działa tylko dla detektora rms.
+  pipeline_llm_model:
+    name: Model tekstowy pipeline
+    description: Tekstowy model Gemini dla dostawcy "pipeline" (rozpoznanie mowy, potem model tekstowy z narzędziami, potem synteza mowy). Puste = domyślny.
+  pipeline_tts_model:
+    name: Model syntezy mowy pipeline
+    description: Model text-to-speech Gemini dla dostawcy "pipeline". Puste = gemini-3.8-flash-lite-tts.
+  pipeline_tts_voice:
+    name: Głos pipeline
+    description: Nazwa głosu dla syntezy w trybie pipeline. Puste = głos Gemini ustawiony wyżej.
+  pipeline_min_speech_ms:
+    name: Minimalna ilość mowy (pipeline)
+    description: Nagrania z mniejszą ilością wykrytej mowy są pomijane zamiast transkrybowane — rozpoznawanie ze słownikiem urządzeń inaczej wymyśla komendy z szumu w tle. Wymaga detektora Silero.
 network:
   8765/tcp: Main WebSocket channel between Voice PE and the proxy. Firmware should point to ws://home-assistant:8765; microphone audio and control messages use this port.
   8766/tcp: WAV/HTTP server used by the ESP32 media player to play Gemini responses. The proxy sends /response/<session>.wav over WebSocket and the device downloads audio from this port.

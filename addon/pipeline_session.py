@@ -1,0 +1,305 @@
+"""Speech-to-text -> text model -> text-to-speech, instead of one speech-to-speech model.
+
+On 384 real recordings (2026-10-25) Gemini 3.8 Live picked the right action for
+85% of commands and swapped "włącz"/"wyłącz" in 7% of them even on clean audio.
+Transcribing first (gpt-4o-transcribe primed with the device names) and letting
+a text model choose the tool got 96-97% with no swapped on/off at all, and
+reached the tool call sooner. This mirrors how phone and speaker assistants are
+built: a dedicated recogniser, then intent handling, then speech synthesis.
+
+The trade-off is that a vocabulary-primed recogniser "hears" device names in
+pure noise, so clips with almost no detected speech are dropped before they
+reach it (see speech_vad).
+"""
+import asyncio
+import io
+import json
+import os
+import re
+import time
+import wave
+from typing import AsyncGenerator, Awaitable, Callable
+
+import aiohttp
+from google import genai
+from google.genai import types
+
+import speech_vad
+from ai_common import (
+    DEVICE_SAMPLE_RATE,
+    QUERY_TOOLS,
+    build_prompt,
+    build_tool_specs,
+    debug_log,
+    web_search,
+)
+
+
+def _cfg(name: str, default: str) -> str:
+    """bashio hands unset add-on options through as the literal string "null"."""
+    value = os.getenv(name, "").strip()
+    return default if not value or value.lower() == "null" else value
+
+
+OPENAI_API_KEY = _cfg("OPENAI_API_KEY", "")
+STT_MODEL = _cfg("PIPELINE_STT_MODEL", "gpt-4o-transcribe")
+LLM_MODEL = _cfg("PIPELINE_LLM_MODEL", "gemini-3.1-flash-lite")
+TTS_MODEL = _cfg("PIPELINE_TTS_MODEL", "gemini-3.8-flash-lite-tts")
+TTS_VOICE = _cfg("PIPELINE_TTS_VOICE", _cfg("GEMINI_VOICE", "Charon"))
+MIN_SPEECH_MS = int(_cfg("PIPELINE_MIN_SPEECH_MS", "300"))
+MAX_TOOL_ROUNDS = 3
+
+# Kept open between commands: a fresh TLS handshake to the STT endpoint costs
+# a noticeable slice of the latency budget on every utterance.
+_http: aiohttp.ClientSession | None = None
+
+
+def _http_session() -> aiohttp.ClientSession:
+    global _http
+    if _http is None or _http.closed:
+        _http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+    return _http
+
+PIPELINE_PROMPT = """
+=== TRYB TEKSTOWY ===
+Dostajesz tekst rozpoznany z mowy użytkownika; może zawierać drobne błędy rozpoznawania —
+zinterpretuj go jako najbardziej prawdopodobne polecenie po polsku. Twoja odpowiedź tekstowa
+zostanie przeczytana na głos, więc pisz krótko, naturalnie, bez list i formatowania,
+liczby słownie gdy to naturalne.
+Przy sterowaniu urządzeniami, scenami, skryptami i klimatyzacją wywołaj narzędzie i w tej samej
+odpowiedzi dopisz bardzo krótkie potwierdzenie (np. „Gaszę lampkę na biurku.”).
+Przy pytaniach (stan urządzeń, wyszukiwanie, minutniki, parking) najpierw wywołaj narzędzie,
+odpowiedź podaj dopiero na podstawie wyniku.
+Jeśli tekst nie jest poleceniem ani pytaniem do Ciebie (urywek rozmowy, szum), nie wywołuj
+żadnego narzędzia i nie odpowiadaj nic.
+=== KONIEC TRYBU TEKSTOWEGO ===
+"""
+
+
+def _vocabulary(entity_list: str) -> str:
+    """Device and room names from the entity list, to prime the recogniser."""
+    labels = set()
+    for line in entity_list.splitlines():
+        m = re.match(r"- \S+ \((.*)\)", line)
+        if m:
+            labels.update(p.strip() for p in m.group(1).split(", ") if "=" not in p)
+    return ", ".join(sorted(labels))
+
+
+def _wav_bytes(pcm: bytes) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(DEVICE_SAMPLE_RATE)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+class _HeldSpeech:
+    """Synthesise a sentence now, play it only once release() is called."""
+
+    def __init__(self, session: "PipelineSession", text: str):
+        self._pending: list[bytes] = []
+        self._out: Callable[[bytes], Awaitable[None]] | None = None
+        self._task = asyncio.create_task(session._speak(text, self._sink))
+
+    async def _sink(self, data: bytes):
+        if self._out is None:
+            self._pending.append(data)
+        else:
+            await self._out(data)
+
+    async def release(self, on_audio_out: Callable[[bytes], Awaitable[None]]):
+        while self._pending:
+            await on_audio_out(self._pending.pop(0))
+        # No await between the drained buffer and the switch, so no chunk can slip in between.
+        self._out = on_audio_out
+        await self._task
+
+    def cancel(self):
+        self._task.cancel()
+
+
+class PipelineSession:
+    """One voice command through STT -> text model with tools -> TTS."""
+
+    def __init__(self, client: genai.Client, entity_list: str, room_lights: dict,
+                 ha_context: str, history: list, on_function_call: Callable,
+                 voice: str | None = None,
+                 on_responding: Callable | None = None,
+                 vacuum_enabled: bool = False,
+                 local_area_id: str = "",
+                 stream_stats: dict | None = None):
+        self.client = client
+        self.entity_list = entity_list
+        self.room_lights = room_lights
+        self.ha_context = ha_context
+        self.history = history
+        self.on_function_call = on_function_call
+        self.on_responding = on_responding
+        self.vacuum_enabled = vacuum_enabled
+        self.local_area_id = local_area_id
+        self.stream_stats = stream_stats
+
+    async def stream_audio(
+        self,
+        audio_chunks: AsyncGenerator[bytes, None],
+        on_audio_out: Callable[[bytes], Awaitable[None]],
+    ) -> str:
+        """Collect the utterance, then transcribe, act and answer.
+
+        Returns a summary of what happened, for conversation history.
+        """
+        pcm = b"".join([chunk async for chunk in audio_chunks])
+        t0 = time.monotonic()
+        if self.on_responding:
+            self.on_responding()
+
+        # The proxy measured speech while streaming; measure here only when it could not.
+        speech = (self.stream_stats or {}).get("speech_ms") or 0
+        if not speech and speech_vad.available():
+            speech = speech_vad.speech_ms(pcm)
+        if speech_vad.available() and speech < MIN_SPEECH_MS:
+            print(f"  [pipeline] only {speech} ms of speech, not a command — skipped", flush=True)
+            return ""
+
+        text = await self._transcribe(pcm)
+        t_stt = time.monotonic()
+        print(f"  [pipeline] HEARD (user): {text!r}", flush=True)
+        if not text:
+            return ""
+
+        first_audio: list[float] = []
+
+        async def timed_audio_out(data: bytes):
+            if not first_audio:
+                first_audio.append(time.monotonic())
+            await on_audio_out(data)
+
+        answer, calls = await self._respond(text, timed_audio_out)
+        print(f"  [pipeline] SAID (model): {answer!r}", flush=True)
+        first = f"{1000 * (first_audio[0] - t0):.0f}ms" if first_audio else "none"
+        print(f"  [pipeline] stt={1000 * (t_stt - t0):.0f}ms first_audio={first} "
+              f"total={1000 * (time.monotonic() - t0):.0f}ms", flush=True)
+
+        summary = " ".join(calls)
+        if answer:
+            summary = f"{summary} {answer}".strip()
+        return f"(usłyszano: {text}) {summary}".strip() if summary else ""
+
+    async def _transcribe(self, pcm: bytes) -> str:
+        if not OPENAI_API_KEY:
+            print("  [pipeline] ERROR: openai_api_key is required for transcription", flush=True)
+            return ""
+        prompt = ("Polecenia głosowe do inteligentnego domu po polsku, np. włącz, wyłącz, zapal, "
+                  "zgaś, klimatyzacja, nawiew, minutnik, parking. Urządzenia: "
+                  + _vocabulary(self.entity_list))
+        form = aiohttp.FormData()
+        form.add_field("file", _wav_bytes(pcm), filename="in.wav", content_type="audio/wav")
+        form.add_field("model", STT_MODEL)
+        form.add_field("language", "pl")
+        form.add_field("prompt", prompt)
+        try:
+            async with _http_session().post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                data=form,
+            ) as resp:
+                body = await resp.json(content_type=None)
+                if resp.status != 200:
+                    print(f"  [pipeline] STT ERROR {resp.status}: {str(body)[:300]}", flush=True)
+                    return ""
+                return (body.get("text") or "").strip()
+        except Exception as err:  # noqa: BLE001 - surfaced as the error tone by the proxy
+            print(f"  [pipeline] STT ERROR: {type(err).__name__}: {err}", flush=True)
+            return ""
+
+    def _model_config(self) -> types.GenerateContentConfig:
+        specs = build_tool_specs(list(self.room_lights.keys()), self.vacuum_enabled)
+        prompt = build_prompt(self.entity_list, self.ha_context, self.history,
+                              self.local_area_id) + PIPELINE_PROMPT
+        thinking = (types.ThinkingConfig(thinking_budget=0) if LLM_MODEL.startswith("gemini-2.5")
+                    else types.ThinkingConfig(thinking_level="minimal"))
+        return types.GenerateContentConfig(
+            system_instruction=prompt,
+            tools=[types.Tool(function_declarations=[types.FunctionDeclaration(**s) for s in specs])],
+            temperature=0,
+            thinking_config=thinking,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
+
+    async def _call_tool(self, fc) -> dict:
+        args = dict(fc.args or {})
+        try:
+            if fc.name == "search_web":
+                return await web_search(args.get("query", ""), self.client)
+            return await self.on_function_call(fc.name, args)
+        except Exception as err:  # noqa: BLE001 - the model must still get an answer
+            print(f"  [pipeline] TOOL ERROR {fc.name}: {err}", flush=True)
+            return {"status": "error", "message": str(err)}
+
+    async def _respond(self, text: str,
+                       on_audio_out: Callable[[bytes], Awaitable[None]]) -> tuple[str, list[str]]:
+        """Let the text model act on the transcript and speak its answer."""
+        config = self._model_config()
+        contents = [types.Content(role="user", parts=[types.Part(text=text)])]
+        made: list[str] = []
+        for _ in range(MAX_TOOL_ROUNDS):
+            try:
+                resp = await self.client.aio.models.generate_content(
+                    model=LLM_MODEL, contents=contents, config=config)
+            except Exception as err:  # noqa: BLE001
+                print(f"  [pipeline] LLM ERROR: {type(err).__name__}: {err}", flush=True)
+                return "", made
+            calls = resp.function_calls or []
+            parts = (resp.candidates[0].content.parts if resp.candidates and resp.candidates[0].content
+                     else None) or []
+            said = "".join(p.text for p in parts if p.text and not p.thought).strip()
+            if not calls:
+                if said:
+                    await self._speak(said, on_audio_out)
+                return said, made
+
+            for fc in calls:
+                debug_log(f"  [pipeline] FC: {fc.name}({dict(fc.args or {})})")
+                made.append(f"{fc.name}({dict(fc.args or {})})")
+
+            # A plain action comes with its confirmation already written. Synthesise it
+            # while Home Assistant carries the action out, but hold the audio back
+            # until the action is confirmed: never announce something that failed.
+            plain = all(fc.name not in QUERY_TOOLS for fc in calls)
+            held = _HeldSpeech(self, said) if plain and said else None
+            results = await asyncio.gather(*(self._call_tool(fc) for fc in calls))
+            ok = all(isinstance(r, dict) and r.get("status") == "ok" and not r.get("no_change")
+                     for r in results)
+            if held is not None:
+                if ok:
+                    await held.release(on_audio_out)
+                    return said, made
+                held.cancel()
+
+            contents.append(resp.candidates[0].content)
+            contents.append(types.Content(role="user", parts=[
+                types.Part(function_response=types.FunctionResponse(
+                    id=fc.id, name=fc.name, response=r if isinstance(r, dict) else {"result": r}))
+                for fc, r in zip(calls, results)
+            ]))
+        return "", made
+
+    async def _speak(self, text: str, on_audio_out: Callable[[bytes], Awaitable[None]]) -> None:
+        config = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=TTS_VOICE))),
+        )
+        try:
+            stream = await self.client.aio.models.generate_content_stream(
+                model=TTS_MODEL, contents=text, config=config)
+            async for chunk in stream:
+                for cand in chunk.candidates or []:
+                    for part in (cand.content.parts if cand.content else None) or []:
+                        if part.inline_data and part.inline_data.data:
+                            await on_audio_out(part.inline_data.data)
+        except Exception as err:  # noqa: BLE001 - the action already happened; just log
+            print(f"  [pipeline] TTS ERROR: {type(err).__name__}: {err}", flush=True)

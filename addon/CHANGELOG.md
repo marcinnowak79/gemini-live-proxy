@@ -2,6 +2,26 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.8.0
+
+- Silero voice activity detection. The microphone stream is now judged by a
+  small neural speech detector (2 MB ONNX, onnxruntime from Alpine) instead of
+  a loudness threshold, so noise no longer starts or prolongs an utterance and
+  the end of a command is detected after 1.0 s of silence instead of 1.8 s.
+  Options: `vad_engine` (`silero`/`rms`), `vad_silence_timeout_ms`. Falls back
+  to the loudness detector if the model cannot load.
+- New `pipeline` provider: speech-to-text (gpt-4o-transcribe primed with the
+  device names), then a Gemini text model with the same tools, then Gemini
+  text-to-speech. On 384 real recordings it chose the right action for 96.5%
+  of commands with no swapped on/off, against 85% and 7% swapped for Gemini
+  3.8 Live. Select it with the provider entity (any option containing
+  "pipeline"). Clips with under `pipeline_min_speech_ms` of detected speech
+  are dropped, because a vocabulary-primed recogniser invents commands out of
+  background noise. The spoken confirmation of a plain action is synthesised
+  while Home Assistant carries it out and played only once it succeeded.
+  Options: `pipeline_llm_model`, `pipeline_tts_model`, `pipeline_tts_voice`,
+  `pipeline_min_speech_ms`. Needs `openai_api_key` for transcription.
+
 ## 1.7.0
 
 - Faster on/off confirmation: after a light/switch action the add-on now waits

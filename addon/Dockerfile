@@ -8,12 +8,12 @@ LABEL \
   io.hass.type="app" \
   io.hass.arch="${BUILD_ARCH}"
 
-RUN apk add --no-cache python3 py3-pip py3-numpy
+RUN apk add --no-cache python3 py3-pip py3-numpy py3-onnxruntime
 
 COPY requirements.txt /tmp/
 RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 
-COPY proxy_server.py ai_common.py ai_provider.py gemini_session.py grok_session.py openai_session.py ha_client.py plugins.py protocol.py timer_manager.py /app/
+COPY proxy_server.py ai_common.py ai_provider.py gemini_session.py grok_session.py openai_session.py pipeline_session.py speech_vad.py silero_vad.onnx ha_client.py plugins.py protocol.py timer_manager.py /app/
 COPY run.sh /
 
 RUN chmod a+x /run.sh

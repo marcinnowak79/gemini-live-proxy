@@ -74,6 +74,24 @@ configuration:
   plugin_api_token:
     name: Plugin API token
     description: Shared secret for POST /plugins/<id>/secret/<name> on port 8766, used to push in credentials that expire and can only be created elsewhere - for example the parking cookie refreshed weekly from a Mac. Leave empty to disable the endpoint entirely.
+  vad_engine:
+    name: Voice activity detector
+    description: The silero option uses a small neural speech detector that tells speech from noise at any volume, so the end of a command is detected sooner and noise does not start or prolong an utterance. "rms" is the old loudness threshold.
+  vad_silence_timeout_ms:
+    name: Silence that ends a command (Silero)
+    description: Milliseconds of silence after speech that end the utterance when the Silero detector is active. 1000 ms suited real recordings; raise it if long pauses inside commands get cut off. mic_silence_timeout_ms applies only to the rms detector.
+  pipeline_llm_model:
+    name: Pipeline text model
+    description: Gemini text model used by the "pipeline" provider (speech-to-text, then a text model with tools, then text-to-speech). Empty uses the built-in default.
+  pipeline_tts_model:
+    name: Pipeline speech model
+    description: Gemini text-to-speech model used by the "pipeline" provider. Empty uses gemini-3.8-flash-lite-tts.
+  pipeline_tts_voice:
+    name: Pipeline voice
+    description: Voice name for the pipeline speech model. Empty uses the Gemini voice above.
+  pipeline_min_speech_ms:
+    name: Minimum speech for a command (pipeline)
+    description: Clips with less detected speech are ignored instead of transcribed. The vocabulary-primed recogniser otherwise invents device commands out of background noise. Needs the Silero detector.
 network:
   8765/tcp: Main WebSocket channel between Voice PE and the proxy. Firmware should point to ws://home-assistant:8765; microphone audio and control messages use this port.
   8766/tcp: WAV/HTTP server used by the ESP32 media player to play Gemini responses. The proxy sends /response/<session>.wav over WebSocket and the device downloads audio from this port.

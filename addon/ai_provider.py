@@ -12,6 +12,7 @@ from ai_common import debug_log
 from gemini_session import GeminiSession
 from grok_session import GrokSession
 from openai_session import OpenAISession
+from pipeline_session import PipelineSession
 
 def _cfg(name: str, default: str = "") -> str:
     """bashio hands unset add-on options through as the literal string "null"."""
@@ -32,6 +33,9 @@ _ALIASES = {
     "grok": "grok",
     "xai": "grok",
     "x.ai": "grok",
+    "pipeline": "pipeline",
+    "stt": "pipeline",
+    "tekst": "pipeline",
 }
 
 
@@ -71,12 +75,26 @@ async def resolve_provider() -> str:
 def create_session(provider: str, *, gemini_client, entity_list: str, room_lights: dict,
                    ha_context: str, history: list, on_function_call,
                    voice: str | None = None, on_responding=None,
-                   vacuum_enabled: bool = False, local_area_id: str = ""):
+                   vacuum_enabled: bool = False, local_area_id: str = "",
+                   stream_stats: dict | None = None):
     """Build a session object for the given provider.
 
     Both classes expose the same stream_audio(audio_chunks, on_audio_out)
     contract, so the caller needs no further branching.
     """
+    if provider == "pipeline":
+        return PipelineSession(
+            client=gemini_client,
+            entity_list=entity_list,
+            room_lights=room_lights,
+            ha_context=ha_context,
+            history=history,
+            on_function_call=on_function_call,
+            on_responding=on_responding,
+            vacuum_enabled=vacuum_enabled,
+            local_area_id=local_area_id,
+            stream_stats=stream_stats,
+        )
     if provider in ("openai", "grok"):
         # Grok speaks the same Realtime protocol; only the connection profile
         # on the session class differs.
