@@ -18,6 +18,10 @@ Proxy → ESP32:
 MSG_AUDIO_IN = 0x01
 MSG_AUDIO_END = 0x02
 MSG_BARGE_IN = 0x03
+# Diagnostics only: XMOS channel 1 (no AGC) matching the last MSG_AUDIO_IN chunk,
+# and the XMOS voice-to-noise ratio as one byte (0-100).
+MSG_AUDIO_AUX = 0x04
+MSG_VNR = 0x05
 
 # Message types: Proxy → ESP32
 MSG_AUDIO_OUT = 0x01

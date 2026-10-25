@@ -110,7 +110,13 @@ def debug_log(message: str):
         print(message, flush=True)
 
 
-def save_input_audio(pcm_chunks: list) -> None:
+def _rms(pcm: bytes) -> float:
+    samples = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16).astype(np.float64)
+    return float(np.sqrt(np.mean(samples ** 2))) if samples.size else 0.0
+
+
+def save_input_audio(pcm_chunks: list, aux_chunks: list | None = None,
+                     vnr: list | None = None) -> None:
     """Debug: dump the buffered post-wake-word mic audio to a 16kHz mono WAV.
 
     Used to catch what triggers the wake word (e.g. false activations from a
@@ -133,6 +139,20 @@ def save_input_audio(pcm_chunks: list) -> None:
             w.setframerate(INPUT_AUDIO_SAMPLE_RATE)
             w.writeframes(raw)
         print(f"  [stream] Saved input audio -> {path}", flush=True)
+        # Channel 1 and the VNR trace go to a side folder under the same name, so
+        # they line up with the main clip without counting towards its ring cleanup.
+        if aux_chunks or vnr:
+            aux_dir = os.path.join(INPUT_AUDIO_DIR, "aux")
+            os.makedirs(aux_dir, exist_ok=True)
+            if aux_chunks:
+                with wave.open(os.path.join(aux_dir, name), "wb") as w:
+                    w.setnchannels(1)
+                    w.setsampwidth(2)
+                    w.setframerate(INPUT_AUDIO_SAMPLE_RATE)
+                    w.writeframes(b"".join(aux_chunks))
+            if vnr:
+                with open(os.path.join(aux_dir, name[:-4] + "_vnr.json"), "w") as f:
+                    json.dump(vnr, f)
         # ring cleanup: keep newest INPUT_AUDIO_KEEP
         files = sorted(
             (f for f in os.listdir(INPUT_AUDIO_DIR) if f.startswith("in_") and f.endswith(".wav"))
@@ -451,6 +471,8 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             thinking_sent = False
             function_call_seen = False
             buffered_pcm_chunks: list[bytes] = []
+            aux_pcm_chunks: list[bytes] = []
+            vnr_trace: list[int] = []
             audio_in_queue: asyncio.Queue[tuple[int, bytes, float] | None] = asyncio.Queue(maxsize=512)
             reader_task: asyncio.Task | None = None
             stream_stop_reason = "unknown"
@@ -607,6 +629,13 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                         if mt == MSG_AUDIO_END:
                             stream_stop_reason = "esp_audio_end"
                             break
+                        if mt == MSG_AUDIO_AUX:
+                            aux_pcm_chunks.append(d)
+                            continue
+                        if mt == MSG_VNR:
+                            if d:
+                                vnr_trace.append(d[0])
+                            continue
                         if mt != MSG_AUDIO_IN:
                             continue
 
@@ -764,8 +793,18 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 f"result: {summary[:80] if summary else 'none'}"
             )
 
+            if aux_pcm_chunks or vnr_trace:
+                ch0 = b"".join(buffered_pcm_chunks)
+                ch1 = b"".join(aux_pcm_chunks)
+                print(
+                    f"  [stream] channels: ch0_rms={_rms(ch0):.0f} ch1_rms={_rms(ch1):.0f} "
+                    f"ch1/ch0_bytes={len(ch1)}/{len(ch0)} "
+                    f"vnr_max={max(vnr_trace, default=0)} "
+                    f"vnr_mean={sum(vnr_trace) / len(vnr_trace) if vnr_trace else 0:.0f}",
+                    flush=True,
+                )
             if SAVE_INPUT_AUDIO:
-                save_input_audio(buffered_pcm_chunks)
+                save_input_audio(buffered_pcm_chunks, aux_pcm_chunks, vnr_trace)
 
             # Signal end of audio stream
             if response_audio_bytes > 0:

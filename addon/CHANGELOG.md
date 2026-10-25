@@ -2,6 +2,15 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.8.2
+
+- Records XMOS diagnostics sent by the matching Voice PE firmware: channel 1
+  (the XMOS stage without AGC) and the voice-to-noise ratio. Each command logs
+  `channels: ch0_rms=… ch1_rms=… vnr_max=… vnr_mean=…`, and with
+  `save_input_audio` on, channel 1 and the VNR trace are saved under
+  `/share/gemini_in/aux/` with the same name as the main clip. The voice
+  backends still get channel 0 only; older firmware is unaffected.
+
 ## 1.8.1
 
 - Pipeline: one text-model round per command instead of two. The confirmation
