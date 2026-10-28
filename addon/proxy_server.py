@@ -85,6 +85,8 @@ STREAM_TRIM_LEAD_BYTES = int(INPUT_AUDIO_SAMPLE_RATE * 2 * STREAM_TRIM_LEAD_MS /
 RESPONSE_SAMPLE_RATE = 48000
 RESPONSE_SAMPLE_WIDTH = 2
 RESPONSE_PREBUFFER_MS = int(os.getenv("RESPONSE_PREBUFFER_MS", "700"))
+RESPONSE_FETCH_WAIT_SECONDS = float(os.getenv("RESPONSE_FETCH_WAIT_SECONDS", "1.5"))
+RESPONSE_FETCH_ATTEMPTS = int(os.getenv("RESPONSE_FETCH_ATTEMPTS", "2"))
 RESPONSE_PREBUFFER_BYTES = int(RESPONSE_SAMPLE_RATE * RESPONSE_SAMPLE_WIDTH * RESPONSE_PREBUFFER_MS / 1000)
 # Shared secret for pushing rotated plugin credentials in. Empty disables the
 # endpoint outright — an unauthenticated credential writer is not a default.
@@ -232,6 +234,9 @@ class ResponseAudioSession:
 
     def __init__(self):
         self.ready = asyncio.Event()
+        # Set when the ESP32 media player requests the stream. Lets the session
+        # hold back RESPONSE_END until playback has actually been picked up.
+        self.fetched = asyncio.Event()
         self.closed = False
         self.chunks: list[bytes] = []
         self.condition = asyncio.Condition()
@@ -401,6 +406,25 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             f"  [stream] MSG_RESPONSE_START sent for {audio_path} "
             f"(prebuffer={response_audio_bytes}B, target={RESPONSE_PREBUFFER_BYTES}B)"
         )
+
+    async def wait_for_response_fetch(session: ResponseAudioSession):
+        for attempt in range(1, RESPONSE_FETCH_ATTEMPTS + 1):
+            try:
+                await asyncio.wait_for(session.fetched.wait(), RESPONSE_FETCH_WAIT_SECONDS)
+                if attempt > 1:
+                    print(f"  [stream] Response fetched after re-announce (attempt {attempt})", flush=True)
+                return
+            except asyncio.TimeoutError:
+                pass
+            if attempt == RESPONSE_FETCH_ATTEMPTS:
+                break
+            print(f"  [stream] Response not fetched after {RESPONSE_FETCH_WAIT_SECONDS:.1f}s, "
+                  f"re-sending MSG_RESPONSE_START for {audio_path}", flush=True)
+            try:
+                await websocket.send(pack_message(MSG_RESPONSE_START, audio_path.encode()))
+            except websockets.exceptions.ConnectionClosed:
+                return
+        print(f"  [stream] Response never fetched by ESP32 ({audio_path})", flush=True)
 
     async def send_audio_to_esp32(audio_data: bytes):
         """Stream response audio to the replayable HTTP session."""
@@ -815,6 +839,13 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             if audio_session is not None:
                 await audio_session.close()
 
+            # The firmware drops a pending playback when RESPONSE_END lands before
+            # its main loop has acted on RESPONSE_START, so the answer is never
+            # fetched. Hold RESPONSE_END until the stream is requested, and nudge
+            # once more with RESPONSE_START if it isn't.
+            if first_chunk_sent and audio_session is not None:
+                await wait_for_response_fetch(audio_session)
+
             # Signal session end (LED cleanup) + drain stale data
             try:
                 await websocket.send(pack_message(MSG_RESPONSE_END))
@@ -967,6 +998,7 @@ async def run_audio_http_server():
         session = _audio_sessions.get(session_id)
         if session is None:
             return web.Response(status=404, text="No active session")
+        session.fetched.set()
 
         try:
             await asyncio.wait_for(session.ready.wait(), timeout=15.0)

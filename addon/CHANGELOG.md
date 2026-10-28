@@ -2,6 +2,16 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.8.4
+
+- Fixes answers that were never played. The Voice PE firmware dropped a
+  pending playback when `RESPONSE_END` arrived before its main loop had acted
+  on `RESPONSE_START`, so about one command in six was carried out silently.
+  The proxy now holds `RESPONSE_END` until the speaker has requested the
+  response stream, re-sending `RESPONSE_START` once if it has not within 1.5 s
+  (`RESPONSE_FETCH_WAIT_SECONDS`, `RESPONSE_FETCH_ATTEMPTS`). Matching firmware
+  keeps the pending playback on `RESPONSE_END`.
+
 ## 1.8.3
 
 - Gemini Live input transcription is locked to the assistant language
