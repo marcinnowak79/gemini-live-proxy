@@ -92,6 +92,9 @@ configuration:
   pipeline_min_speech_ms:
     name: Minimum speech for a command (pipeline)
     description: Clips with less detected speech are ignored instead of transcribed. The vocabulary-primed recogniser otherwise invents device commands out of background noise. Needs the Silero detector.
+  pipeline_ok_confirmation:
+    name: Confirm actions with "OK" (pipeline)
+    description: A plain action that succeeded is confirmed with one prerecorded "OK" in the assistant's voice instead of a synthesised sentence. Questions, failures and "already off" still get a spoken answer.
 network:
   8765/tcp: Main WebSocket channel between Voice PE and the proxy. Firmware should point to ws://home-assistant:8765; microphone audio and control messages use this port.
   8766/tcp: WAV/HTTP server used by the ESP32 media player to play Gemini responses. The proxy sends /response/<session>.wav over WebSocket and the device downloads audio from this port.

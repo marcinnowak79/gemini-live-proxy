@@ -1,6 +1,6 @@
 name: "Gemini Live Proxy"
 slug: gemini_live_proxy
-version: "1.8.4"
+version: "1.9.0"
 description: "WebSocket proxy between ESP32 Voice PE and Gemini Live API"
 image: "ghcr.io/marcinnowak79/gemini-live-proxy-{arch}"
 arch:
@@ -78,6 +78,7 @@ options:
   pipeline_tts_model: ""
   pipeline_tts_voice: ""
   pipeline_min_speech_ms: 300
+  pipeline_ok_confirmation: true
   session_timeout_seconds: 30
   gemini_max_retries: 0
   timer_media_player_entity_id: ""
@@ -120,6 +121,7 @@ schema:
   pipeline_tts_model: str?
   pipeline_tts_voice: str?
   pipeline_min_speech_ms: int?
+  pipeline_ok_confirmation: bool?
   session_timeout_seconds: float?
   gemini_max_retries: int?
   timer_media_player_entity_id: str?

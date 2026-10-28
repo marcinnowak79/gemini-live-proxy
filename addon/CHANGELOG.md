@@ -2,6 +2,16 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.9.0
+
+- Pipeline: a plain action that succeeded is confirmed with a stock "OK"
+  instead of a sentence written by the model and synthesised per command.
+  The clip is synthesised once in the assistant's voice, trimmed and cached
+  under `/data`, so the confirmation plays as soon as Home Assistant confirms
+  the action. Questions still get a spoken answer, and so do failed actions
+  and ones that changed nothing ("already off"). The tools no longer carry
+  a `say` field in this mode. Option `pipeline_ok_confirmation` (default on).
+
 ## 1.8.4
 
 - Fixes answers that were never played. The Voice PE firmware dropped a
