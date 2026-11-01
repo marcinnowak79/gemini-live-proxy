@@ -193,7 +193,7 @@ _live_states_ready = False
 _live_states_changed = asyncio.Event()
 # How long to wait for the websocket to report the new state before one final
 # REST read decides. The old fixed poll schedule gave up after ~2.2 s.
-VERIFY_TIMEOUT_SECONDS = float(os.getenv("HA_VERIFY_TIMEOUT_SECONDS", "2.5"))
+VERIFY_TIMEOUT_SECONDS = float(os.getenv("HA_VERIFY_TIMEOUT_SECONDS", "6"))
 
 
 def _notify_live_states_changed() -> None:

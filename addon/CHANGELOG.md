@@ -2,6 +2,14 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.9.1
+
+- Action verification waits up to 6 s (was 2.5 s) for the new state. Slow
+  no-neutral Zigbee wall switches report their state 4-5 s after the command,
+  so the assistant used to say an action failed although the lights did go
+  off. Fast devices still confirm immediately. Override with
+  `HA_VERIFY_TIMEOUT_SECONDS`.
+
 ## 1.9.0
 
 - Pipeline: a plain action that succeeded is confirmed with a stock "OK"
