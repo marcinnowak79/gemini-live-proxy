@@ -5,6 +5,7 @@ do with which vendor answers the audio, so they live here. Each provider module
 adapts these plain dicts to its own SDK types.
 """
 import json
+import re
 import os
 
 from plugins import registry as plugin_registry
@@ -437,3 +438,68 @@ async def web_search(query: str, gemini_client=None) -> dict:
 
 def json_dumps_compact(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+# --- Godzina słownie (TTS czytał „20:42” jako „dwudziesta czterdziesta druga") ---
+_PL_ORD_UNITS = ["", "pierwsza", "druga", "trzecia", "czwarta", "piąta", "szósta",
+                 "siódma", "ósma", "dziewiąta", "dziesiąta", "jedenasta", "dwunasta",
+                 "trzynasta", "czternasta", "piętnasta", "szesnasta", "siedemnasta",
+                 "osiemnasta", "dziewiętnasta", "dwudziesta"]
+_PL_CARD = ["zero", "jeden", "dwa", "trzy", "cztery", "pięć", "sześć", "siedem", "osiem",
+            "dziewięć", "dziesięć", "jedenaście", "dwanaście", "trzynaście", "czternaście",
+            "piętnaście", "szesnaście", "siedemnaście", "osiemnaście", "dziewiętnaście"]
+_PL_TENS = {2: "dwadzieścia", 3: "trzydzieści", 4: "czterdzieści", 5: "pięćdziesiąt"}
+
+
+def _pl_hour(h: int) -> str:
+    if h == 0:
+        return "zero"
+    if h <= 20:
+        return _PL_ORD_UNITS[h]
+    return "dwudziesta " + _PL_ORD_UNITS[h - 20]
+
+
+def _pl_minutes(m: int) -> str:
+    if m < 10:
+        return "zero " + _PL_CARD[m]
+    if m < 20:
+        return _PL_CARD[m]
+    tens, unit = divmod(m, 10)
+    return _PL_TENS[tens] + ("" if unit == 0 else " " + _PL_CARD[unit])
+
+
+def _pl_decline(hour_words: str, case: str) -> str:
+    """Odmień porządkowy (rodz. żeński): 'gen' → dwudziestej drugiej, 'ins' → dwudziestą drugą."""
+    if hour_words == "zero":
+        return hour_words
+    out = []
+    for w in hour_words.split():
+        if case == "gen":
+            out.append(w[:-1] + ("iej" if w.endswith("ga") else "ej"))
+        else:
+            out.append(w[:-1] + "ą")
+    return " ".join(out)
+
+
+def spoken_time_pl(h: int, m: int, case: str = "nom") -> str:
+    """20:42 → 'dwudziesta czterdzieści dwa'; case gen/ins dla 'o/do/po…' / 'przed/za…'."""
+    hour = _pl_hour(h)
+    if case != "nom":
+        hour = _pl_decline(hour, case)
+    return hour if m == 0 else f"{hour} {_pl_minutes(m)}"
+
+
+_PL_PREP_CASE = {"o": "gen", "po": "gen", "do": "gen", "od": "gen", "około": "gen",
+                 "koło": "gen", "na": "ins", "przed": "ins", "za": "ins", "między": "ins", "nad": "ins"}
+_TIME_RE = re.compile(r"(?:(?<=\s)|^)(?:(?P<prep>[A-Za-zżźćńółęąśŻŹĆŃÓŁĘĄŚ]+)\s+)?"
+                      r"(?P<h>[01]?\d|2[0-3]):(?P<m>[0-5]\d)(?!\d)")
+
+
+def speak_times_pl(text: str) -> str:
+    """Zamień godziny HH:MM w tekście do TTS na słowa z odmianą po przyimku."""
+    def repl(mt: "re.Match") -> str:
+        prep = mt.group("prep")
+        case = _PL_PREP_CASE.get(prep.lower(), "nom") if prep else "nom"
+        words = spoken_time_pl(int(mt.group("h")), int(mt.group("m")), case)
+        return f"{prep} {words}" if prep else words
+    return _TIME_RE.sub(repl, text)

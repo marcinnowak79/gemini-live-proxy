@@ -33,6 +33,7 @@ from ai_common import (
     build_prompt,
     build_tool_specs,
     debug_log,
+    speak_times_pl,
     web_search,
 )
 
@@ -149,6 +150,7 @@ async def _synthesise(client: genai.Client, text: str,
         speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
             prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=TTS_VOICE))),
     )
+    text = speak_times_pl(text)
     t_tts = time.monotonic()
     first = True
     try:

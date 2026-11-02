@@ -173,7 +173,11 @@ async def get_ha_context() -> str:
         time_str = now.strftime("%A, %d %B %Y, %H:%M")
         lat = config.get("latitude", 0)
         lon = config.get("longitude", 0)
-        return f"\nAktualny czas: {time_str}\nStrefa: {config['time_zone']}\nWspółrzędne: {lat:.2f}, {lon:.2f}\n"
+        from ai_common import spoken_time_pl
+        spoken = spoken_time_pl(now.hour, now.minute)
+        return (f"\nAktualny czas: {time_str} (godzinę mów tak: „{spoken}” — minuty liczebnikiem "
+                f"głównym, np. 20:42 = „dwudziesta czterdzieści dwa”, nie „czterdziesta druga”)"
+                f"\nStrefa: {config['time_zone']}\nWspółrzędne: {lat:.2f}, {lon:.2f}\n")
     except Exception:
         return ""
 

@@ -2,6 +2,15 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.10.2
+
+- Times are spoken the Polish way: "20:42" is now "dwudziesta czterdzieści
+  dwa" instead of the TTS reading the minutes as an ordinal ("czterdziesta
+  druga"). The Pipeline provider rewrites every HH:MM before speech synthesis,
+  declining the hour after prepositions ("o dwudziestej pierwszej trzydzieści",
+  "przed trzynastą"); the live providers get the spoken form next to the
+  current time in the prompt.
+
 ## 1.10.1
 
 - Pipeline: the recording is cut to 100-6500 Hz before transcription. The
