@@ -80,6 +80,9 @@ configuration:
   vad_silence_timeout_ms:
     name: Silence that ends a command (Silero)
     description: Milliseconds of silence after speech that end the utterance when the Silero detector is active. 1000 ms suited real recordings; raise it if long pauses inside commands get cut off. mic_silence_timeout_ms applies only to the rms detector.
+  speaker_arbitration:
+    name: One speaker per command
+    description: When several speakers wake on the same command, only the one that hears it loudest (the closest) carries it out and answers; the others go back to idle silently. Decided while you are still speaking, so it adds no delay.
   pipeline_llm_model:
     name: Pipeline text model
     description: Gemini text model used by the "pipeline" provider (speech-to-text, then a text model with tools, then text-to-speech). Empty uses the built-in default.

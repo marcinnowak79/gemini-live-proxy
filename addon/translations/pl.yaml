@@ -71,6 +71,9 @@ configuration:
   vad_silence_timeout_ms:
     name: Cisza kończąca komendę (Silero)
     description: Ile milisekund ciszy po mowie kończy nagranie przy detektorze Silero. 1000 ms sprawdziło się na prawdziwych nagraniach; zwiększ, jeśli długie pauzy w środku komendy ją ucinają. mic_silence_timeout_ms działa tylko dla detektora rms.
+  speaker_arbitration:
+    name: Jeden głośnik na komendę
+    description: Gdy kilka głośników obudzi się na tę samą komendę, wykonuje ją i odpowiada tylko ten, który słyszy ją najgłośniej (najbliższy); pozostałe po cichu wracają do czuwania. Decyzja zapada jeszcze w trakcie mówienia, więc nie dodaje opóźnienia.
   pipeline_llm_model:
     name: Model tekstowy pipeline
     description: Tekstowy model Gemini dla dostawcy "pipeline" (rozpoznanie mowy, potem model tekstowy z narzędziami, potem synteza mowy). Puste = domyślny.

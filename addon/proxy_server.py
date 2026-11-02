@@ -29,6 +29,8 @@ from google import genai
 from protocol import *
 import ha_client
 import speech_vad
+import speaker_arbiter
+from speaker_arbiter import arbiter
 from ha_client import get_exposed_entities, get_ha_context, execute_function, is_vacuum_enabled, get_device_states_context
 from ai_provider import create_session, resolve_provider
 from plugins import registry as plugin_registry
@@ -473,6 +475,9 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
 
             t0 = time.monotonic()
             debug_log("  [stream] First chunk received, opening Gemini session...")
+            # Several speakers may have woken on the same command; see speaker_arbiter.
+            speaker = str(websocket.remote_address[0]) if websocket.remote_address else "?"
+            participant = arbiter.join(speaker) if speaker_arbiter.ENABLED else None
             await websocket.send(pack_message(MSG_STATE_LISTENING))
 
             # Create streaming queue for this session
@@ -573,7 +578,8 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             async def handle_function_call_for_session(n, a):
                 nonlocal function_call_seen
                 function_call_seen = True
-                result = await handle_function_call(n, a, room_lights, send_audio_to_esp32)
+                result = await speaker_arbiter.run_once(
+                    n, a, speaker, lambda: handle_function_call(n, a, room_lights, send_audio_to_esp32))
                 remember_action(n, a, result)
                 return result
 
@@ -610,10 +616,14 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 speech_threshold = MIC_RMS_MIN_SPEECH
                 stream_vad = speech_vad.StreamVAD() if USE_SILERO else None
                 silence_timeout_ms = VAD_SILENCE_TIMEOUT_MS if stream_vad else MIC_SILENCE_TIMEOUT_MS
+                rms_speech_ms = 0
 
                 # Keep streaming until Gemini responds (stop_streaming set by receive task)
                 try:
                     while not stop_streaming:
+                        if participant is not None and participant.lost.is_set():
+                            stream_stop_reason = "arbiter_lost"
+                            break
                         now = time.monotonic()
                         elapsed_ms = (now - stream_started) * 1000
                         silence_ms = (now - last_voice) * 1000
@@ -674,6 +684,11 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                                 stream_stats["speech_ms"] = stream_vad.speech_ms
                             else:
                                 is_voice = rms >= speech_threshold
+                                if is_voice:
+                                    rms_speech_ms += len(pcm) * 1000 // (INPUT_AUDIO_SAMPLE_RATE * 2)
+                            if participant is not None:
+                                arbiter.update(participant, rms, is_voice,
+                                               stream_vad.speech_ms if stream_vad is not None else rms_speech_ms)
                             if is_voice:
                                 voice_run += 1
                                 # A lone above-threshold chunk (household crackle/click) must
@@ -700,6 +715,15 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                                 lead_trim_remaining = 0
                             buffered_pcm_chunks.append(pcm)
                             yield pcm
+                    if participant is not None:
+                        if not participant.lost.is_set():
+                            arbiter.finish(participant)
+                        if participant.lost.is_set():
+                            # Another speaker serves this command. Never hand the
+                            # provider an ended utterance: it would transcribe and
+                            # act on it. The session task is cancelled instead.
+                            stream_stop_reason = "arbiter_lost"
+                            await asyncio.Event().wait()
                 finally:
                     stop_streaming = True
                     if not thinking_sent:
@@ -726,15 +750,43 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                         f"stop_reason={stream_stop_reason}"
                     )
 
+            async def run_session() -> str:
+                stream_task = asyncio.create_task(session.stream_audio(
+                    audio_chunks=realtime_audio_stream(),
+                    on_audio_out=send_audio_to_esp32,
+                ))
+                if participant is None:
+                    return await asyncio.wait_for(stream_task, timeout=SESSION_TIMEOUT_SECONDS)
+                lost_wait = asyncio.create_task(participant.lost.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {stream_task, lost_wait}, timeout=SESSION_TIMEOUT_SECONDS,
+                        return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    lost_wait.cancel()
+                if stream_task in done:
+                    return stream_task.result()
+                stream_task.cancel()
+                try:
+                    await stream_task
+                except BaseException:
+                    pass
+                if participant.lost.is_set():
+                    raise speaker_arbiter.ArbitrationLost()
+                raise asyncio.TimeoutError()
+
             timed_out = False
+            arbitration_lost = False
             try:
-                summary = await asyncio.wait_for(
-                    session.stream_audio(
-                        audio_chunks=realtime_audio_stream(),
-                        on_audio_out=send_audio_to_esp32,
-                    ),
-                    timeout=SESSION_TIMEOUT_SECONDS,
-                )
+                summary = await run_session()
+            except speaker_arbiter.ArbitrationLost:
+                arbitration_lost = True
+                summary = ""
+                # Let the reader swallow the audio already in flight before the
+                # speaker gets RESPONSE_END, so none of it opens a new session.
+                await asyncio.sleep(0.3)
+                print(f"  [stream] {speaker}: another speaker took this command — standing down silently",
+                      flush=True)
             except asyncio.TimeoutError:
                 print(f"  [stream] Session timeout ({SESSION_TIMEOUT_SECONDS:.0f}s)", flush=True)
                 timed_out = True
@@ -803,7 +855,9 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             # was streamed AND there was no action/result. Covers both timeouts and clean
             # empty responses (e.g. Gemini returned nothing for a noisy/empty utterance) so
             # the user never gets dead silence and knows to repeat.
-            if not first_chunk_sent and not summary:
+            if participant is not None and participant.lost.is_set():
+                arbitration_lost = True
+            if not first_chunk_sent and not summary and not arbitration_lost:
                 reason = "timeout" if timed_out else "no result"
                 print(f"  [stream] Playing local fallback error tone ({reason})", flush=True)
                 fallback = make_error_tone_pcm()

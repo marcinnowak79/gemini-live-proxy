@@ -2,6 +2,23 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.10.0
+
+- One speaker per command. With several Voice PEs, a command heard by two or
+  three of them used to run on each: every speaker transcribed its own copy,
+  heard it slightly differently and acted on that, and every one answered (or
+  played the error tone). Speakers that wake within 1 s of each other now form
+  a group; after 300 ms of speech the one with the loudest speech (the closest)
+  carries on and the others are stopped mid-utterance and go back to idle
+  without a sound. The winner never waits for the decision. Measured on the
+  recordings that prompted this, speech level ranks the speakers correctly
+  where speech-over-noise did not.
+- Backstop: the same state-changing call from another speaker within 3 s is
+  not repeated (it gets the first call's result).
+- Option `speaker_arbitration` (on by default). Tuning via
+  `ARBITER_GROUP_WINDOW_MS`, `ARBITER_SCORE_SPEECH_MS`,
+  `ARBITER_DECIDE_WAIT_MS`, `ARBITER_DEDUP_SECONDS`.
+
 ## 1.9.1
 
 - Action verification waits up to 6 s (was 2.5 s) for the new state. Slow
