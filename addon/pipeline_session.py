@@ -22,6 +22,7 @@ import wave
 from typing import AsyncGenerator, Awaitable, Callable
 
 import aiohttp
+import numpy as np
 from google import genai
 from google.genai import types
 
@@ -48,6 +49,13 @@ LLM_MODEL = _cfg("PIPELINE_LLM_MODEL", "gemini-3.1-flash-lite")
 TTS_MODEL = _cfg("PIPELINE_TTS_MODEL", "gemini-3.8-flash-lite-tts")
 TTS_VOICE = _cfg("PIPELINE_TTS_VOICE", _cfg("GEMINI_VOICE", "Charon"))
 MIN_SPEECH_MS = int(_cfg("PIPELINE_MIN_SPEECH_MS", "300"))
+# Band handed to the recogniser, "<low>-<high>" Hz, or "off". The Voice PE
+# carries a steady tone near 7.8 kHz in both XMOS channels (on every recording
+# since at least 2026-10-25; room-independent), and the Echo Dot a rumble under
+# 100 Hz. Cutting both changed the transcripts of the 2026-11-02 recordings:
+# Voice PE "przed pochodnią" 4/4 -> "przed pokojem" 2/4, and a garbled
+# "Czy światło przekopałeś?" -> "Zgaś światło w przedpokoju".
+STT_BAND = _cfg("PIPELINE_STT_BAND", "100-6500").lower()
 # A plain action that succeeded is confirmed with one stock "OK" instead of a
 # sentence written by the model and synthesised per command.
 OK_CONFIRMATION = _cfg("PIPELINE_OK_CONFIRMATION", "true").lower() == "true"
@@ -195,6 +203,22 @@ def _fit_enums(args: dict, spec: dict | None) -> dict:
     return fixed
 
 
+def _speech_band(pcm: bytes) -> bytes:
+    """Drop everything outside STT_BAND before transcription (whole clip, one FFT)."""
+    if STT_BAND in ("", "off", "none") or len(pcm) < 64:
+        return pcm
+    try:
+        low, high = (float(v) for v in STT_BAND.split("-"))
+    except ValueError:
+        return pcm
+    x = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16).astype(np.float64)
+    spectrum = np.fft.rfft(x)
+    freqs = np.fft.rfftfreq(x.size, 1 / DEVICE_SAMPLE_RATE)
+    spectrum[(freqs < low) | (freqs > high)] = 0
+    y = np.fft.irfft(spectrum, x.size)
+    return np.clip(np.round(y), -32768, 32767).astype(np.int16).tobytes()
+
+
 def _wav_bytes(pcm: bytes) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -331,7 +355,7 @@ class PipelineSession:
                   "zgaś, klimatyzacja, nawiew, minutnik, parking. Urządzenia: "
                   + _vocabulary(self.entity_list))
         form = aiohttp.FormData()
-        form.add_field("file", _wav_bytes(pcm), filename="in.wav", content_type="audio/wav")
+        form.add_field("file", _wav_bytes(_speech_band(pcm)), filename="in.wav", content_type="audio/wav")
         form.add_field("model", STT_MODEL)
         form.add_field("language", "pl")
         form.add_field("prompt", prompt)

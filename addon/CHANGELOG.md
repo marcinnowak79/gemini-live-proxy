@@ -2,6 +2,15 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.10.1
+
+- Pipeline: the recording is cut to 100-6500 Hz before transcription. The
+  Voice PE carries a steady tone near 7.8 kHz in both XMOS channels on every
+  recording, and the Echo Dot a rumble under 100 Hz; neither is speech. On the
+  same recordings the transcriber turned "przed pochodnią" (4 of 4 runs) into
+  "przed pokojem" in half the runs, and garbled guesses into "Zgaś światło w
+  przedpokoju". Override with `PIPELINE_STT_BAND` (`off` disables).
+
 ## 1.10.0
 
 - One speaker per command. With several Voice PEs, a command heard by two or
