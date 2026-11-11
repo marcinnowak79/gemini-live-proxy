@@ -229,6 +229,7 @@ def get_recent_action_context() -> str:
 
 
 timer_manager = TimerManager()
+DEVICE_ALARM_POLL_SECONDS = 25.0
 
 # Streaming audio state keyed by one response session.
 class ResponseAudioSession:
@@ -346,7 +347,7 @@ def prepare_response_pcm(audio_data: bytes) -> bytes:
 
 
 async def handle_function_call(name: str, args: dict, room_lights: dict,
-                                send_audio_cb) -> dict:
+                                send_audio_cb, speaker: str = "") -> dict:
     """Handle function calls — HA actions + timers."""
     if name == "set_timer":
         return await timer_manager.set_timer(
@@ -357,6 +358,7 @@ async def handle_function_call(name: str, args: dict, room_lights: dict,
             media_url=args.get("media_url", ""),
             media_content_type=args.get("media_content_type", ""),
             script_id=args.get("script_id", ""),
+            speaker=speaker,
         )
     if name == "list_timers":
         return await timer_manager.list_timers()
@@ -579,7 +581,7 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 nonlocal function_call_seen
                 function_call_seen = True
                 result = await speaker_arbiter.run_once(
-                    n, a, speaker, lambda: handle_function_call(n, a, room_lights, send_audio_to_esp32))
+                    n, a, speaker, lambda: handle_function_call(n, a, room_lights, send_audio_to_esp32, speaker))
                 remember_action(n, a, result)
                 return result
 
@@ -1108,8 +1110,27 @@ async def run_audio_http_server():
         print(f"  [http] plugin secret {plugin_id}/{secret_name} -> {result}", flush=True)
         return web.json_response(result, status=status)
 
+    async def handle_device_alarm(request):
+        """Long-poll for speakers that ring their own timer alarms (Echo Dot).
+
+        They only hold a websocket during a voice session, so this is how an idle
+        one learns that a timer set on it has finished. `state` is what the
+        speaker believes (1 = ringing); the reply is the current truth, sent as
+        soon as it differs, or after DEVICE_ALARM_POLL_SECONDS.
+        """
+        known = request.query.get("state", "0") == "1"
+        ringing = await timer_manager.wait_device_alarm(
+            request.remote or "?", known, DEVICE_ALARM_POLL_SECONDS)
+        return web.Response(text="1" if ringing else "0")
+
+    async def handle_device_alarm_stop(request):
+        result = await timer_manager.stop_device_alarm(request.remote or "?")
+        return web.json_response(result)
+
     app = web.Application()
     app.router.add_get("/response/{session_id}.wav", handle_response_wav)
+    app.router.add_get("/device/alarm", handle_device_alarm)
+    app.router.add_post("/device/alarm/stop", handle_device_alarm_stop)
     app.router.add_post("/plugins/{plugin_id}/secret/{secret_name}", handle_plugin_secret)
     runner = web.AppRunner(app)
     await runner.setup()

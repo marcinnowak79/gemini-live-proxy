@@ -240,6 +240,11 @@ Example:
 media_player.home_assistant_voice_0a32f9_media_player
 ```
 
+A timer rings on the speaker it was set on when that speaker plays its own
+alarm (the Echo Dot satellite does: it polls `GET /device/alarm` on the audio
+port and stops the alarm with any button). Timers set on other speakers ring on
+`timer_media_player_entity_id`.
+
 `timer_default_media_url` is the default URL played when the user asks for music/media after a timer without naming a specific URL.
 
 Example:

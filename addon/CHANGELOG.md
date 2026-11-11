@@ -2,6 +2,16 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.11.0
+
+- A timer now rings on the speaker it was set on. Speakers that are not Home
+  Assistant media players (the Echo Dot satellite) keep a long-poll open on
+  `GET /device/alarm` and play the alarm themselves; a button press on the
+  speaker stops it through `POST /device/alarm/stop`, and "stop" by voice works
+  as before. Timers set on any other speaker still ring on
+  `timer_media_player_entity_id`. An alarm moves to that media player if its
+  speaker goes offline while ringing, and stops by itself after 10 minutes.
+
 ## 1.10.2
 
 - Times are spoken the Polish way: "20:42" is now "dwudziesta czterdzieści

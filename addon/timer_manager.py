@@ -20,6 +20,11 @@ DEFAULT_MEDIA_URL = os.getenv("TIMER_DEFAULT_MEDIA_URL", "").strip()
 DEFAULT_SCRIPT_ID = os.getenv("TIMER_DEFAULT_SCRIPT_ID", "").strip()
 DEFAULT_MEDIA_CONTENT_TYPE = os.getenv("TIMER_DEFAULT_MEDIA_CONTENT_TYPE", "music").strip() or "music"
 ALARM_REPEAT_INTERVAL_SECONDS = float(os.getenv("TIMER_ALARM_REPEAT_INTERVAL_SECONDS", "3.0"))
+# A speaker that rings its own alarms keeps a long-poll open on /device/alarm.
+# One that has not polled for this long is treated as gone.
+DEVICE_SEEN_TTL_SECONDS = float(os.getenv("TIMER_DEVICE_SEEN_TTL_SECONDS", "90"))
+DEVICE_RING_MAX_SECONDS = float(os.getenv("TIMER_DEVICE_RING_MAX_SECONDS", "600"))
+DEVICE_RING_GUARD_INTERVAL_SECONDS = 10.0
 
 
 class TimerManager:
@@ -32,6 +37,62 @@ class TimerManager:
         self.tasks: dict[str, asyncio.Task] = {}
         self.ringing_tasks: dict[str, asyncio.Task] = {}
         self.lock = asyncio.Lock()
+        # Speakers that ring their own alarms: address -> monotonic time of last poll.
+        self.devices: dict[str, float] = {}
+        self.alarm_changed = asyncio.Condition()
+
+    def device_seen(self, speaker: str) -> None:
+        self.devices[speaker] = time.monotonic()
+
+    def device_can_ring(self, speaker: str) -> bool:
+        seen = self.devices.get(speaker)
+        return seen is not None and time.monotonic() - seen <= DEVICE_SEEN_TTL_SECONDS
+
+    def device_ringing(self, speaker: str) -> bool:
+        return any(t.get("ring_on") == speaker for t in self.ringing.values())
+
+    async def wait_device_alarm(self, speaker: str, known: bool, timeout: float) -> bool:
+        """Long-poll for a speaker: return its ringing state once it differs from `known`."""
+        self.device_seen(speaker)
+        deadline = time.monotonic() + timeout
+        async with self.alarm_changed:
+            while self.device_ringing(speaker) == known:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    await asyncio.wait_for(self.alarm_changed.wait(), remaining)
+                except asyncio.TimeoutError:
+                    break
+        self.device_seen(speaker)
+        return self.device_ringing(speaker)
+
+    async def stop_device_alarm(self, speaker: str) -> dict:
+        """Stop the alarms ringing on one speaker (its button was pressed)."""
+        stopped = []
+        async with self.lock:
+            for tid in [t for t, d in self.ringing.items() if d.get("ring_on") == speaker]:
+                stopped.append(self._public_timer(self._pop_ringing_locked(tid), ringing=True))
+            await self._save_locked()
+        await self._notify_alarm_changed()
+        print(f"  [timer] STOPPED {len(stopped)} alarm(s) on speaker {speaker}", flush=True)
+        return {"status": "ok", "stopped": stopped, "count": len(stopped)}
+
+    async def _notify_alarm_changed(self) -> None:
+        async with self.alarm_changed:
+            self.alarm_changed.notify_all()
+
+    def _pop_ringing_locked(self, timer_id: str) -> dict | None:
+        timer_data = self.ringing.pop(timer_id, None)
+        task = self.ringing_tasks.pop(timer_id, None)
+        if task and task is not asyncio.current_task():
+            task.cancel()
+        return timer_data
+
+    async def _stop_media_player_alarm(self, stopped_data: list[dict]) -> None:
+        """Silence the HA media player, unless every stopped alarm rang on its own speaker."""
+        if DEFAULT_MEDIA_PLAYER and any(not d.get("ring_on") for d in stopped_data):
+            await call_ha_service("media_player", "media_stop", {"entity_id": DEFAULT_MEDIA_PLAYER})
 
     async def start(self) -> None:
         """Load persisted timers and schedule future ones."""
@@ -45,6 +106,9 @@ class TimerManager:
                 else:
                     self._schedule_locked(timer_id, timer_data)
             for timer_id, timer_data in list(self.ringing.items()):
+                if timer_data.get("ring_on"):
+                    # Give the speaker time to poll again after an add-on restart.
+                    self.device_seen(timer_data["ring_on"])
                 self._schedule_ringing_locked(timer_id, timer_data)
         for timer_id, timer_data in expired:
             asyncio.create_task(self._finish_timer(timer_id, timer_data))
@@ -58,6 +122,7 @@ class TimerManager:
         media_url: str = "",
         media_content_type: str = "",
         script_id: str = "",
+        speaker: str = "",
     ) -> dict:
         seconds = max(1, int(seconds))
         action = (action or "notify").strip()
@@ -94,6 +159,8 @@ class TimerManager:
             "media_url": media_url,
             "media_content_type": media_content_type,
             "script_id": script_id,
+            # Address of the speaker the timer was set on; it rings there if it can.
+            "speaker": speaker,
         }
 
         async with self.lock:
@@ -101,7 +168,8 @@ class TimerManager:
             self._schedule_locked(timer_id, timer_data)
             await self._save_locked()
 
-        print(f"  [timer] START id={timer_id} label='{label}' seconds={seconds} action={action}", flush=True)
+        print(f"  [timer] START id={timer_id} label='{label}' seconds={seconds} action={action} "
+              f"speaker={speaker or '-'}", flush=True)
         return {
             "status": "ok",
             "timer": self._public_timer(timer_data),
@@ -156,19 +224,18 @@ class TimerManager:
                 cancelled.append(self._public_timer(timer_data))
 
             stopped = []
+            stopped_data = []
             for tid in ringing_ids:
-                timer_data = self.ringing.pop(tid, None)
+                timer_data = self._pop_ringing_locked(tid)
                 if not timer_data:
                     continue
-                task = self.ringing_tasks.pop(tid, None)
-                if task:
-                    task.cancel()
+                stopped_data.append(timer_data)
                 stopped.append(self._public_timer(timer_data, ringing=True))
 
             await self._save_locked()
 
-        if stopped and DEFAULT_MEDIA_PLAYER:
-            await call_ha_service("media_player", "media_stop", {"entity_id": DEFAULT_MEDIA_PLAYER})
+        await self._notify_alarm_changed()
+        await self._stop_media_player_alarm(stopped_data)
 
         print(f"  [timer] CANCELLED {len(cancelled)} timer(s), stopped {len(stopped)} alarm(s)", flush=True)
         return {"status": "ok", "cancelled": cancelled, "stopped": stopped, "count": len(cancelled), "stopped_count": len(stopped)}
@@ -190,18 +257,17 @@ class TimerManager:
                     if timer_data.get("label", "").lower() == label
                 ]
 
+            stopped_data = []
             for tid in ids:
-                timer_data = self.ringing.pop(tid, None)
+                timer_data = self._pop_ringing_locked(tid)
                 if not timer_data:
                     continue
-                task = self.ringing_tasks.pop(tid, None)
-                if task:
-                    task.cancel()
+                stopped_data.append(timer_data)
                 stopped.append(self._public_timer(timer_data, ringing=True))
             await self._save_locked()
 
-        if stopped and DEFAULT_MEDIA_PLAYER:
-            await call_ha_service("media_player", "media_stop", {"entity_id": DEFAULT_MEDIA_PLAYER})
+        await self._notify_alarm_changed()
+        await self._stop_media_player_alarm(stopped_data)
         print(f"  [timer] STOPPED {len(stopped)} alarm(s)", flush=True)
         return {"status": "ok", "stopped": stopped, "count": len(stopped)}
 
@@ -215,7 +281,8 @@ class TimerManager:
         old_task = self.ringing_tasks.pop(timer_id, None)
         if old_task:
             old_task.cancel()
-        self.ringing_tasks[timer_id] = asyncio.create_task(self._ring_alarm(timer_id, timer_data))
+        ring = self._guard_device_alarm if timer_data.get("ring_on") else self._ring_alarm
+        self.ringing_tasks[timer_id] = asyncio.create_task(ring(timer_id, timer_data))
 
     async def _run_timer(self, timer_id: str, timer_data: dict) -> None:
         try:
@@ -254,6 +321,40 @@ class TimerManager:
         except asyncio.CancelledError:
             pass
 
+    async def _guard_device_alarm(self, timer_id: str, timer_data: dict) -> None:
+        """Watch an alarm ringing on its own speaker.
+
+        The speaker plays the sound itself, so nothing here makes noise. Stop the
+        alarm after DEVICE_RING_MAX_SECONDS, and hand it to the HA media player
+        if the speaker stops polling (unplugged, off Wi-Fi) while it rings.
+        """
+        speaker = timer_data.get("ring_on", "")
+        try:
+            while True:
+                await asyncio.sleep(DEVICE_RING_GUARD_INTERVAL_SECONDS)
+                since = float(timer_data.get("ringing_since", time.time()))
+                expired = time.time() - since >= DEVICE_RING_MAX_SECONDS
+                if not expired and self.device_can_ring(speaker):
+                    continue
+                async with self.lock:
+                    if timer_id not in self.ringing:
+                        return
+                    if expired:
+                        self._pop_ringing_locked(timer_id)
+                        print(f"  [timer] Alarm id={timer_id} unanswered for "
+                              f"{DEVICE_RING_MAX_SECONDS:.0f}s on {speaker}, stopped", flush=True)
+                    else:
+                        timer_data.pop("ring_on", None)
+                        self.ringing_tasks.pop(timer_id, None)
+                        self._schedule_ringing_locked(timer_id, timer_data)
+                        print(f"  [timer] Speaker {speaker} gone, alarm id={timer_id} "
+                              f"moved to the media player", flush=True)
+                    await self._save_locked()
+                await self._notify_alarm_changed()
+                return
+        except asyncio.CancelledError:
+            pass
+
     async def _execute_action(self, timer_data: dict) -> dict:
         action = timer_data.get("action", "notify")
         label = timer_data.get("label", "timer")
@@ -281,12 +382,17 @@ class TimerManager:
             "message": f"Timer '{label}' finished.",
             "notification_id": f"gemini_timer_{timer_id}",
         })
-        if DEFAULT_MEDIA_PLAYER and DEFAULT_MEDIA_URL:
+        speaker = timer_data.get("speaker", "")
+        ring_on_speaker = bool(speaker) and self.device_can_ring(speaker)
+        if ring_on_speaker or (DEFAULT_MEDIA_PLAYER and DEFAULT_MEDIA_URL):
             timer_data["ringing_since"] = time.time()
+            if ring_on_speaker:
+                timer_data["ring_on"] = speaker
             async with self.lock:
                 self.ringing[timer_id] = timer_data
                 self._schedule_ringing_locked(timer_id, timer_data)
                 await self._save_locked()
+            await self._notify_alarm_changed()
             return {"status": notification.get("status", "ok"), "notification": notification, "ringing": self._public_timer(timer_data, ringing=True)}
         return notification
 
@@ -327,6 +433,7 @@ class TimerManager:
             "remaining_seconds": remaining,
             "action": timer_data.get("action", "notify"),
             "state": "ringing" if ringing else "active",
+            "ring_on": timer_data.get("ring_on", ""),
             "media_player_entity_id": timer_data.get("media_player_entity_id", ""),
             "script_id": timer_data.get("script_id", ""),
         }
