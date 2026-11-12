@@ -2,6 +2,17 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.11.1
+
+- Fix: spoken answers in the Pipeline mode were silent. `google-genai` 3.x
+  talks to the v1 API by default, which rejects the TTS voice settings with
+  `400 Unknown name "speechConfig"`; the Gemini client is now pinned to
+  `v1beta`.
+- If TTS still fails before any audio went out (error or quota), that one
+  sentence is retried on `PIPELINE_TTS_FALLBACK_MODEL`
+  (`gemini-3.8-flash-tts`; `off` disables). The next answer starts again on
+  the main TTS model.
+
 ## 1.11.0
 
 - A timer now rings on the speaker it was set on. Speakers that are not Home

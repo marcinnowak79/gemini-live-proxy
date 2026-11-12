@@ -105,7 +105,10 @@ _gemini_client: genai.Client | None = None
 def shared_gemini_client() -> genai.Client:
     global _gemini_client
     if _gemini_client is None:
-        _gemini_client = genai.Client(api_key=API_KEY)
+        # google-genai 3.x defaults to the v1 API, which has no speechConfig:
+        # every TTS call failed with 400 "Unknown name speechConfig" (2026-11-12).
+        _gemini_client = genai.Client(
+            api_key=API_KEY, http_options=genai.types.HttpOptions(api_version="v1beta"))
     return _gemini_client
 
 

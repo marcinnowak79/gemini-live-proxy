@@ -48,6 +48,10 @@ OPENAI_API_KEY = _cfg("OPENAI_API_KEY", "")
 STT_MODEL = _cfg("PIPELINE_STT_MODEL", "gpt-4o-transcribe")
 LLM_MODEL = _cfg("PIPELINE_LLM_MODEL", "gemini-3.1-flash-lite")
 TTS_MODEL = _cfg("PIPELINE_TTS_MODEL", "gemini-3.8-flash-lite-tts")
+# Used for one sentence when TTS_MODEL fails before any audio; "off" disables.
+TTS_FALLBACK_MODEL = _cfg("PIPELINE_TTS_FALLBACK_MODEL", "gemini-3.8-flash-tts")
+if TTS_FALLBACK_MODEL.lower() == "off":
+    TTS_FALLBACK_MODEL = ""
 TTS_VOICE = _cfg("PIPELINE_TTS_VOICE", _cfg("GEMINI_VOICE", "Charon"))
 MIN_SPEECH_MS = int(_cfg("PIPELINE_MIN_SPEECH_MS", "300"))
 # Band handed to the recogniser, "<low>-<high>" Hz, or "off". The Voice PE
@@ -152,20 +156,34 @@ async def _synthesise(client: genai.Client, text: str,
     )
     text = speak_times_pl(text)
     t_tts = time.monotonic()
-    first = True
-    try:
-        stream = await client.aio.models.generate_content_stream(
-            model=TTS_MODEL, contents=text, config=config)
-        async for chunk in stream:
-            if first:
-                first = False
-                debug_log(f"  [pipeline] tts first chunk {1000 * (time.monotonic() - t_tts):.0f}ms")
-            for cand in chunk.candidates or []:
-                for part in (cand.content.parts if cand.content else None) or []:
-                    if part.inline_data and part.inline_data.data:
-                        await on_audio_out(part.inline_data.data)
-    except Exception as err:  # noqa: BLE001 - the action already happened; just log
-        print(f"  [pipeline] TTS ERROR: {type(err).__name__}: {err}", flush=True)
+    # Google's TTS now and then rejects a valid request (2026-11-12: 400
+    # "Unknown name speechConfig") or runs out of per-model quota (429). Such a
+    # failure is retried once on the fallback model, for this sentence only;
+    # the next answer starts again on TTS_MODEL. Once audio has gone out, a
+    # retry would repeat it, so a failure mid-stream is only logged.
+    models = [TTS_MODEL] + ([TTS_FALLBACK_MODEL]
+                            if TTS_FALLBACK_MODEL and TTS_FALLBACK_MODEL != TTS_MODEL else [])
+    for attempt, model in enumerate(models):
+        sent_audio = False
+        first = True
+        try:
+            stream = await client.aio.models.generate_content_stream(
+                model=model, contents=text, config=config)
+            async for chunk in stream:
+                if first:
+                    first = False
+                    debug_log(f"  [pipeline] tts first chunk {1000 * (time.monotonic() - t_tts):.0f}ms ({model})")
+                for cand in chunk.candidates or []:
+                    for part in (cand.content.parts if cand.content else None) or []:
+                        if part.inline_data and part.inline_data.data:
+                            sent_audio = True
+                            await on_audio_out(part.inline_data.data)
+            return
+        except Exception as err:  # noqa: BLE001 - the action already happened; just log
+            print(f"  [pipeline] TTS ERROR ({model}): {type(err).__name__}: {err}", flush=True)
+            if sent_audio or attempt + 1 >= len(models):
+                return
+            print(f"  [pipeline] TTS retry on fallback model {models[attempt + 1]}", flush=True)
 
 
 PIPELINE_PROMPT_OK = PIPELINE_PROMPT.replace(
