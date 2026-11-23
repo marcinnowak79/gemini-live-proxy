@@ -19,6 +19,7 @@ import struct
 import sys
 import time
 import uuid
+import wave
 
 import numpy as np
 import websockets
@@ -26,7 +27,11 @@ from dotenv import load_dotenv
 from google import genai
 
 from protocol import *
-from ha_client import get_exposed_entities, get_ha_context, execute_function, is_vacuum_enabled
+import ha_client
+import speech_vad
+import speaker_arbiter
+from speaker_arbiter import arbiter
+from ha_client import get_exposed_entities, get_ha_context, execute_function, is_vacuum_enabled, get_device_states_context
 from ai_provider import create_session, resolve_provider
 from plugins import registry as plugin_registry
 from timer_manager import TimerManager
@@ -45,19 +50,45 @@ MIC_RMS_INITIAL_NOISE = float(os.getenv("MIC_RMS_INITIAL_NOISE", "120"))
 MIC_SILENCE_TIMEOUT_MS = int(os.getenv("MIC_SILENCE_TIMEOUT_MS", "1800"))
 MIC_NO_SPEECH_TIMEOUT_MS = int(os.getenv("MIC_NO_SPEECH_TIMEOUT_MS", "3500"))
 MIC_MAX_STREAM_MS = int(os.getenv("MIC_MAX_STREAM_MS", "7000"))
+# Min consecutive above-threshold chunks to count as real speech (ignore lone crackles
+# that would otherwise keep resetting the end-of-speech timer and run to MAX_STREAM).
 MIC_VOICE_RUN_MIN = int(os.getenv("MIC_VOICE_RUN_MIN", "2"))
+# "silero" (neural speech detector) or "rms" (the loudness threshold above). Silero
+# tells speech from noise at any volume, so it can end an utterance after a much
+# shorter silence: on 384 real recordings a 1.0 s gap almost only ever followed a
+# finished command, while the loudness detector needed 1.8 s to be safe.
+
+
+def _option(name: str, default: str) -> str:
+    """bashio hands options missing from the saved config through as the string "null"."""
+    value = os.getenv(name, "").strip()
+    return default if not value or value.lower() == "null" else value
+
+
+VAD_ENGINE = _option("VAD_ENGINE", "silero").lower()
+VAD_SILENCE_TIMEOUT_MS = int(_option("VAD_SILENCE_TIMEOUT_MS", "1000"))
+USE_SILERO = VAD_ENGINE == "silero" and speech_vad.available()
 SESSION_TIMEOUT_SECONDS = float(os.getenv("SESSION_TIMEOUT_SECONDS", "30"))
 GEMINI_RETRY_TIMEOUT_SECONDS = float(os.getenv("GEMINI_RETRY_TIMEOUT_SECONDS", "10"))
 GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "0"))
 DIAG_EVENT_LOOP_LAG_WARN_MS = float(os.getenv("DIAG_EVENT_LOOP_LAG_WARN_MS", "250"))
 DIAG_EVENT_LOOP_INTERVAL_SECONDS = float(os.getenv("DIAG_EVENT_LOOP_INTERVAL_SECONDS", "0.25"))
 DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").lower() in ("1", "true", "yes", "on")
-# Drop the first N ms of the mic stream before Gemini (strips the leading wake beep).
+SAVE_INPUT_AUDIO = os.getenv("SAVE_INPUT_AUDIO", "false").lower() in ("1", "true", "yes", "on")
+INPUT_AUDIO_DIR = os.getenv("INPUT_AUDIO_DIR", "/share/gemini_in")
+INPUT_AUDIO_KEEP = int(os.getenv("INPUT_AUDIO_KEEP", "100000"))
+INPUT_AUDIO_SAMPLE_RATE = 16000
+# DISABLED (default 0). A blind fixed-time lead trim clips the start of fast commands
+# (e.g. "wyłącz" -> "...cz"), losing words and flipping on/off. The wake beep plays BEFORE
+# speech and is harmless to Gemini, so we no longer trim. A future smarter version could
+# detect the beep by its known frequency signature and trim only up to its real end.
 STREAM_TRIM_LEAD_MS = int(os.getenv("STREAM_TRIM_LEAD_MS", "0"))
-STREAM_TRIM_LEAD_BYTES = int(16000 * 2 * STREAM_TRIM_LEAD_MS / 1000)
+STREAM_TRIM_LEAD_BYTES = int(INPUT_AUDIO_SAMPLE_RATE * 2 * STREAM_TRIM_LEAD_MS / 1000)
 RESPONSE_SAMPLE_RATE = 48000
 RESPONSE_SAMPLE_WIDTH = 2
 RESPONSE_PREBUFFER_MS = int(os.getenv("RESPONSE_PREBUFFER_MS", "700"))
+RESPONSE_FETCH_WAIT_SECONDS = float(os.getenv("RESPONSE_FETCH_WAIT_SECONDS", "1.5"))
+RESPONSE_FETCH_ATTEMPTS = int(os.getenv("RESPONSE_FETCH_ATTEMPTS", "2"))
 RESPONSE_PREBUFFER_BYTES = int(RESPONSE_SAMPLE_RATE * RESPONSE_SAMPLE_WIDTH * RESPONSE_PREBUFFER_MS / 1000)
 # Shared secret for pushing rotated plugin credentials in. Empty disables the
 # endpoint outright — an unauthenticated credential writer is not a default.
@@ -65,9 +96,88 @@ _plugin_token_raw = os.getenv("PLUGIN_API_TOKEN", "").strip()
 PLUGIN_API_TOKEN = "" if _plugin_token_raw.lower() == "null" else _plugin_token_raw
 
 
+# One client for the whole process. The Voice PE reconnects for every command,
+# and a client per connection threw away its warm HTTPS connections each time,
+# so every pipeline command paid fresh TLS handshakes to Google.
+_gemini_client: genai.Client | None = None
+
+
+def shared_gemini_client() -> genai.Client:
+    global _gemini_client
+    if _gemini_client is None:
+        # google-genai 3.x defaults to the v1 API, which has no speechConfig:
+        # every TTS call failed with 400 "Unknown name speechConfig" (2026-11-12).
+        _gemini_client = genai.Client(
+            api_key=API_KEY, http_options=genai.types.HttpOptions(api_version="v1beta"))
+    return _gemini_client
+
+
 def debug_log(message: str):
     if DEBUG_LOGGING:
         print(message, flush=True)
+
+
+def _rms(pcm: bytes) -> float:
+    samples = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16).astype(np.float64)
+    return float(np.sqrt(np.mean(samples ** 2))) if samples.size else 0.0
+
+
+def save_input_audio(pcm_chunks: list, aux_chunks: list | None = None,
+                     vnr: list | None = None, device: str = "", summary: str = "") -> None:
+    """Debug: dump the buffered post-wake-word mic audio to a 16kHz mono WAV.
+
+    Used to catch what triggers the wake word (e.g. false activations from a
+    TV/film). Keeps only the most recent INPUT_AUDIO_KEEP files.
+    The file name carries the speaker (last IP octet, e.g. _dev153) and
+    index.jsonl maps each file to the full IP and what was heard/done, so
+    recordings can be sorted by microphone (speaker-verification data).
+    """
+    if not pcm_chunks:
+        return
+    try:
+        raw = b"".join(pcm_chunks)
+        samples = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
+        peak = int(np.abs(samples).max()) if samples.size else 0
+        rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2))) if samples.size else 0.0
+        os.makedirs(INPUT_AUDIO_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        dev = f"_dev{device.rsplit('.', 1)[-1]}" if device and device != "?" else ""
+        name = f"in_{stamp}{dev}_peak{int(peak)}_rms{int(rms)}.wav"
+        path = os.path.join(INPUT_AUDIO_DIR, name)
+        with wave.open(path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(INPUT_AUDIO_SAMPLE_RATE)
+            w.writeframes(raw)
+        print(f"  [stream] Saved input audio -> {path}", flush=True)
+        with open(os.path.join(INPUT_AUDIO_DIR, "index.jsonl"), "a") as f:
+            f.write(json.dumps({"file": name, "device": device, "summary": summary},
+                               ensure_ascii=False) + "\n")
+        # Channel 1 and the VNR trace go to a side folder under the same name, so
+        # they line up with the main clip without counting towards its ring cleanup.
+        if aux_chunks or vnr:
+            aux_dir = os.path.join(INPUT_AUDIO_DIR, "aux")
+            os.makedirs(aux_dir, exist_ok=True)
+            if aux_chunks:
+                with wave.open(os.path.join(aux_dir, name), "wb") as w:
+                    w.setnchannels(1)
+                    w.setsampwidth(2)
+                    w.setframerate(INPUT_AUDIO_SAMPLE_RATE)
+                    w.writeframes(b"".join(aux_chunks))
+            if vnr:
+                with open(os.path.join(aux_dir, name[:-4] + "_vnr.json"), "w") as f:
+                    json.dump(vnr, f)
+        # ring cleanup: keep newest INPUT_AUDIO_KEEP
+        files = sorted(
+            (f for f in os.listdir(INPUT_AUDIO_DIR) if f.startswith("in_") and f.endswith(".wav"))
+        )
+        for stale in files[:-INPUT_AUDIO_KEEP]:
+            try:
+                os.remove(os.path.join(INPUT_AUDIO_DIR, stale))
+            except OSError:
+                pass
+    except Exception as exc:  # never let debug-save break a session
+        print(f"  [stream] save_input_audio failed: {exc}", flush=True)
 
 # Conversation history (shared across sessions, 5 min timeout)
 CONTEXT_TIMEOUT = 300
@@ -129,6 +239,7 @@ def get_recent_action_context() -> str:
 
 
 timer_manager = TimerManager()
+DEVICE_ALARM_POLL_SECONDS = 25.0
 
 # Streaming audio state keyed by one response session.
 class ResponseAudioSession:
@@ -136,6 +247,9 @@ class ResponseAudioSession:
 
     def __init__(self):
         self.ready = asyncio.Event()
+        # Set when the ESP32 media player requests the stream. Lets the session
+        # hold back RESPONSE_END until playback has actually been picked up.
+        self.fetched = asyncio.Event()
         self.closed = False
         self.chunks: list[bytes] = []
         self.condition = asyncio.Condition()
@@ -243,7 +357,7 @@ def prepare_response_pcm(audio_data: bytes) -> bytes:
 
 
 async def handle_function_call(name: str, args: dict, room_lights: dict,
-                                send_audio_cb) -> dict:
+                                send_audio_cb, speaker: str = "") -> dict:
     """Handle function calls — HA actions + timers."""
     if name == "set_timer":
         return await timer_manager.set_timer(
@@ -254,6 +368,7 @@ async def handle_function_call(name: str, args: dict, room_lights: dict,
             media_url=args.get("media_url", ""),
             media_content_type=args.get("media_content_type", ""),
             script_id=args.get("script_id", ""),
+            speaker=speaker,
         )
     if name == "list_timers":
         return await timer_manager.list_timers()
@@ -284,7 +399,7 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
     """Handle one ESP32 client connection."""
     debug_log(f"[proxy] ESP32 connected: {websocket.remote_address}")
 
-    client = genai.Client(api_key=API_KEY)
+    client = shared_gemini_client()
 
     first_chunk_sent = False
     audio_session: ResponseAudioSession | None = None
@@ -305,6 +420,25 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             f"  [stream] MSG_RESPONSE_START sent for {audio_path} "
             f"(prebuffer={response_audio_bytes}B, target={RESPONSE_PREBUFFER_BYTES}B)"
         )
+
+    async def wait_for_response_fetch(session: ResponseAudioSession):
+        for attempt in range(1, RESPONSE_FETCH_ATTEMPTS + 1):
+            try:
+                await asyncio.wait_for(session.fetched.wait(), RESPONSE_FETCH_WAIT_SECONDS)
+                if attempt > 1:
+                    print(f"  [stream] Response fetched after re-announce (attempt {attempt})", flush=True)
+                return
+            except asyncio.TimeoutError:
+                pass
+            if attempt == RESPONSE_FETCH_ATTEMPTS:
+                break
+            print(f"  [stream] Response not fetched after {RESPONSE_FETCH_WAIT_SECONDS:.1f}s, "
+                  f"re-sending MSG_RESPONSE_START for {audio_path}", flush=True)
+            try:
+                await websocket.send(pack_message(MSG_RESPONSE_START, audio_path.encode()))
+            except websockets.exceptions.ConnectionClosed:
+                return
+        print(f"  [stream] Response never fetched by ESP32 ({audio_path})", flush=True)
 
     async def send_audio_to_esp32(audio_data: bytes):
         """Stream response audio to the replayable HTTP session."""
@@ -353,6 +487,9 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
 
             t0 = time.monotonic()
             debug_log("  [stream] First chunk received, opening Gemini session...")
+            # Several speakers may have woken on the same command; see speaker_arbiter.
+            speaker = str(websocket.remote_address[0]) if websocket.remote_address else "?"
+            participant = arbiter.join(speaker) if speaker_arbiter.ENABLED else None
             await websocket.send(pack_message(MSG_STATE_LISTENING))
 
             # Create streaming queue for this session
@@ -375,6 +512,8 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             thinking_sent = False
             function_call_seen = False
             buffered_pcm_chunks: list[bytes] = []
+            aux_pcm_chunks: list[bytes] = []
+            vnr_trace: list[int] = []
             audio_in_queue: asyncio.Queue[tuple[int, bytes, float] | None] = asyncio.Queue(maxsize=512)
             reader_task: asyncio.Task | None = None
             stream_stop_reason = "unknown"
@@ -431,9 +570,13 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                     stream_stop_reason = "gemini_responding"
                 stop_streaming = True  # Stop sending mic audio to Gemini
 
-            current_ha_context = await get_ha_context()
+            # Both are small REST reads; run them side by side, not back to back.
+            current_ha_context, provider = await asyncio.gather(get_ha_context(), resolve_provider())
             recent_action_context = get_recent_action_context()
-            session_context = f"{current_ha_context or ''}{recent_action_context}"
+            # Device states come from the live websocket cache: no I/O here.
+            device_states_context = get_device_states_context()
+            session_context = f"{current_ha_context or ''}{device_states_context}{recent_action_context}"
+            debug_log(f"  [context] device states: {device_states_context.count(chr(10) + '- ')} entities")
             if current_ha_context:
                 debug_log(f"  [context] {current_ha_context.strip()}")
             else:
@@ -441,15 +584,18 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
             if recent_action_context:
                 debug_log(f"  [context] {recent_action_context.strip()}")
 
+            # Filled in while the mic streams; the pipeline backend gates on it.
+            stream_stats = {"speech_ms": 0}
+
             async def handle_function_call_for_session(n, a):
                 nonlocal function_call_seen
                 function_call_seen = True
-                result = await handle_function_call(n, a, room_lights, send_audio_to_esp32)
+                result = await speaker_arbiter.run_once(
+                    n, a, speaker, lambda: handle_function_call(n, a, room_lights, send_audio_to_esp32, speaker))
                 remember_action(n, a, result)
                 return result
 
-            # resolved per session so the HA selector switches providers live
-            provider = await resolve_provider()
+            # provider is resolved per session (above) so the HA selector switches providers live
             print(f"  [stream] provider={provider}", flush=True)
 
             session = create_session(
@@ -464,6 +610,7 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 on_responding=on_gemini_responding,
                 vacuum_enabled=is_vacuum_enabled(),
                 local_area_id=local_area_id,
+                stream_stats=stream_stats,
             )
 
             async def realtime_audio_stream():
@@ -479,14 +626,20 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 rms_max = 0.0
                 noise_floor = MIC_RMS_INITIAL_NOISE
                 speech_threshold = MIC_RMS_MIN_SPEECH
+                stream_vad = speech_vad.StreamVAD() if USE_SILERO else None
+                silence_timeout_ms = VAD_SILENCE_TIMEOUT_MS if stream_vad else MIC_SILENCE_TIMEOUT_MS
+                rms_speech_ms = 0
 
                 # Keep streaming until Gemini responds (stop_streaming set by receive task)
                 try:
                     while not stop_streaming:
+                        if participant is not None and participant.lost.is_set():
+                            stream_stop_reason = "arbiter_lost"
+                            break
                         now = time.monotonic()
                         elapsed_ms = (now - stream_started) * 1000
                         silence_ms = (now - last_voice) * 1000
-                        if speech_started and silence_ms >= MIC_SILENCE_TIMEOUT_MS:
+                        if speech_started and silence_ms >= silence_timeout_ms:
                             stream_stop_reason = "local_vad_silence"
                             debug_log(
                                 f"  [stream] Local VAD end after {silence_ms:.0f}ms silence "
@@ -522,6 +675,13 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                         if mt == MSG_AUDIO_END:
                             stream_stop_reason = "esp_audio_end"
                             break
+                        if mt == MSG_AUDIO_AUX:
+                            aux_pcm_chunks.append(d)
+                            continue
+                        if mt == MSG_VNR:
+                            if d:
+                                vnr_trace.append(d[0])
+                            continue
                         if mt != MSG_AUDIO_IN:
                             continue
 
@@ -531,9 +691,22 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                             peak_max = max(peak_max, peak)
                             rms_max = max(rms_max, rms)
                             speech_threshold = max(MIC_RMS_MIN_SPEECH, noise_floor * MIC_RMS_SPEECH_RATIO)
-                            is_voice = rms >= speech_threshold
+                            if stream_vad is not None:
+                                is_voice = stream_vad.feed(pcm) >= speech_vad.THRESHOLD
+                                stream_stats["speech_ms"] = stream_vad.speech_ms
+                            else:
+                                is_voice = rms >= speech_threshold
+                                if is_voice:
+                                    rms_speech_ms += len(pcm) * 1000 // (INPUT_AUDIO_SAMPLE_RATE * 2)
+                            if participant is not None:
+                                arbiter.update(participant, rms, is_voice,
+                                               stream_vad.speech_ms if stream_vad is not None else rms_speech_ms)
                             if is_voice:
                                 voice_run += 1
+                                # A lone above-threshold chunk (household crackle/click) must
+                                # NOT reset the end-of-speech timer — otherwise intermittent
+                                # ambient noise keeps the stream open until MAX_STREAM. Only
+                                # sustained voice (or the very first onset) counts.
                                 if not speech_started or voice_run >= MIC_VOICE_RUN_MIN:
                                     last_voice = time.monotonic()
                                 speech_started = True
@@ -554,6 +727,15 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                                 lead_trim_remaining = 0
                             buffered_pcm_chunks.append(pcm)
                             yield pcm
+                    if participant is not None:
+                        if not participant.lost.is_set():
+                            arbiter.finish(participant)
+                        if participant.lost.is_set():
+                            # Another speaker serves this command. Never hand the
+                            # provider an ended utterance: it would transcribe and
+                            # act on it. The session task is cancelled instead.
+                            stream_stop_reason = "arbiter_lost"
+                            await asyncio.Event().wait()
                 finally:
                     stop_streaming = True
                     if not thinking_sent:
@@ -572,6 +754,7 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                             )
                     debug_log(
                         f"  [stream] Sent {chunk_count} chunks, {total_bytes}B mono16, "
+                        f"vad={'silero' if stream_vad else 'rms'}, speech={stream_stats['speech_ms']}ms, "
                         f"peak={peak_max}, rms={rms_max:.0f}, noise={noise_floor:.0f}, "
                         f"threshold={speech_threshold:.0f}, dropped={dropped_audio_messages}, "
                         f"reader_msgs={reader_message_count}, max_reader_gap={reader_max_gap_ms:.0f}ms, "
@@ -579,17 +762,51 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                         f"stop_reason={stream_stop_reason}"
                     )
 
+            async def run_session() -> str:
+                stream_task = asyncio.create_task(session.stream_audio(
+                    audio_chunks=realtime_audio_stream(),
+                    on_audio_out=send_audio_to_esp32,
+                ))
+                if participant is None:
+                    return await asyncio.wait_for(stream_task, timeout=SESSION_TIMEOUT_SECONDS)
+                lost_wait = asyncio.create_task(participant.lost.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {stream_task, lost_wait}, timeout=SESSION_TIMEOUT_SECONDS,
+                        return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    lost_wait.cancel()
+                if stream_task in done:
+                    return stream_task.result()
+                stream_task.cancel()
+                try:
+                    await stream_task
+                except BaseException:
+                    pass
+                if participant.lost.is_set():
+                    raise speaker_arbiter.ArbitrationLost()
+                raise asyncio.TimeoutError()
+
             timed_out = False
+            arbitration_lost = False
             try:
-                summary = await asyncio.wait_for(
-                    session.stream_audio(
-                        audio_chunks=realtime_audio_stream(),
-                        on_audio_out=send_audio_to_esp32,
-                    ),
-                    timeout=SESSION_TIMEOUT_SECONDS,
-                )
+                summary = await run_session()
+            except speaker_arbiter.ArbitrationLost:
+                arbitration_lost = True
+                summary = ""
+                # Let the reader swallow the audio already in flight before the
+                # speaker gets RESPONSE_END, so none of it opens a new session.
+                await asyncio.sleep(0.3)
+                print(f"  [stream] {speaker}: another speaker took this command — standing down silently",
+                      flush=True)
             except asyncio.TimeoutError:
                 print(f"  [stream] Session timeout ({SESSION_TIMEOUT_SECONDS:.0f}s)", flush=True)
+                timed_out = True
+                summary = ""
+            except Exception as e:
+                # Any Gemini/connect failure must NOT wedge the device: fall through to
+                # the error-tone + RESPONSE_END cleanup path so the mic is freed.
+                print(f"  [stream] Session error: {type(e).__name__}: {e}", flush=True)
                 timed_out = True
                 summary = ""
             finally:
@@ -642,8 +859,17 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 except asyncio.TimeoutError:
                     print(f"  [stream] Gemini retry timeout ({GEMINI_RETRY_TIMEOUT_SECONDS:.0f}s)", flush=True)
                     summary = ""
+                except Exception as e:
+                    print(f"  [stream] Gemini retry error: {type(e).__name__}: {e}", flush=True)
+                    summary = ""
 
-            if not first_chunk_sent and not summary:
+            # Play the "didn't understand" tone whenever NOTHING happened: no response audio
+            # was streamed AND there was no action/result. Covers both timeouts and clean
+            # empty responses (e.g. Gemini returned nothing for a noisy/empty utterance) so
+            # the user never gets dead silence and knows to repeat.
+            if participant is not None and participant.lost.is_set():
+                arbitration_lost = True
+            if not first_chunk_sent and not summary and not arbitration_lost:
                 reason = "timeout" if timed_out else "no result"
                 print(f"  [stream] Playing local fallback error tone ({reason})", flush=True)
                 fallback = make_error_tone_pcm()
@@ -657,6 +883,20 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                 f"result: {summary[:80] if summary else 'none'}"
             )
 
+            if aux_pcm_chunks or vnr_trace:
+                ch0 = b"".join(buffered_pcm_chunks)
+                ch1 = b"".join(aux_pcm_chunks)
+                print(
+                    f"  [stream] channels: ch0_rms={_rms(ch0):.0f} ch1_rms={_rms(ch1):.0f} "
+                    f"ch1/ch0_bytes={len(ch1)}/{len(ch0)} "
+                    f"vnr_max={max(vnr_trace, default=0)} "
+                    f"vnr_mean={sum(vnr_trace) / len(vnr_trace) if vnr_trace else 0:.0f}",
+                    flush=True,
+                )
+            if SAVE_INPUT_AUDIO:
+                save_input_audio(buffered_pcm_chunks, aux_pcm_chunks, vnr_trace,
+                                 device=speaker, summary=summary or "")
+
             # Signal end of audio stream
             if response_audio_bytes > 0:
                 try:
@@ -665,6 +905,13 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                     pass
             if audio_session is not None:
                 await audio_session.close()
+
+            # The firmware drops a pending playback when RESPONSE_END lands before
+            # its main loop has acted on RESPONSE_START, so the answer is never
+            # fetched. Hold RESPONSE_END until the stream is requested, and nudge
+            # once more with RESPONSE_START if it isn't.
+            if first_chunk_sent and audio_session is not None:
+                await wait_for_response_fetch(audio_session)
 
             # Signal session end (LED cleanup) + drain stale data
             try:
@@ -705,7 +952,7 @@ async def run_local_test(entity_list, room_lights, local_area_id=""):
     import numpy as np
     import sounddevice as sd
 
-    client = genai.Client(api_key=API_KEY)
+    client = shared_gemini_client()
     print(f"\n🎤 Local test mode")
     print(f"Voice: {VOICE}")
     print(f"Entities: {len(entity_list.splitlines())}")
@@ -755,7 +1002,7 @@ async def run_local_test(entity_list, room_lights, local_area_id=""):
 
             current_ha_context = await get_ha_context()
             recent_action_context = get_recent_action_context()
-            session_context = f"{current_ha_context or ''}{recent_action_context}"
+            session_context = f"{current_ha_context or ''}{get_device_states_context()}{recent_action_context}"
             if current_ha_context:
                 print(f"  [context] {current_ha_context.strip()}", flush=True)
             else:
@@ -779,6 +1026,7 @@ async def run_local_test(entity_list, room_lights, local_area_id=""):
                 voice=VOICE,
                 vacuum_enabled=is_vacuum_enabled(),
                 local_area_id=local_area_id,
+                stream_stats=stream_stats,
             )
 
             summary = await session.stream_audio(
@@ -817,6 +1065,7 @@ async def run_audio_http_server():
         session = _audio_sessions.get(session_id)
         if session is None:
             return web.Response(status=404, text="No active session")
+        session.fetched.set()
 
         try:
             await asyncio.wait_for(session.ready.wait(), timeout=15.0)
@@ -872,8 +1121,27 @@ async def run_audio_http_server():
         print(f"  [http] plugin secret {plugin_id}/{secret_name} -> {result}", flush=True)
         return web.json_response(result, status=status)
 
+    async def handle_device_alarm(request):
+        """Long-poll for speakers that ring their own timer alarms (Echo Dot).
+
+        They only hold a websocket during a voice session, so this is how an idle
+        one learns that a timer set on it has finished. `state` is what the
+        speaker believes (1 = ringing); the reply is the current truth, sent as
+        soon as it differs, or after DEVICE_ALARM_POLL_SECONDS.
+        """
+        known = request.query.get("state", "0") == "1"
+        ringing = await timer_manager.wait_device_alarm(
+            request.remote or "?", known, DEVICE_ALARM_POLL_SECONDS)
+        return web.Response(text="1" if ringing else "0")
+
+    async def handle_device_alarm_stop(request):
+        result = await timer_manager.stop_device_alarm(request.remote or "?")
+        return web.json_response(result)
+
     app = web.Application()
     app.router.add_get("/response/{session_id}.wav", handle_response_wav)
+    app.router.add_get("/device/alarm", handle_device_alarm)
+    app.router.add_post("/device/alarm/stop", handle_device_alarm_stop)
     app.router.add_post("/plugins/{plugin_id}/secret/{secret_name}", handle_plugin_secret)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -895,6 +1163,7 @@ async def main():
     print(f"  Rooms: {list(room_lights.keys())}")
     print(f"  Local area: {local_area_id or 'none'}")
     plugin_registry.load()
+    asyncio.create_task(ha_client.run_state_cache(ha_client.EXPOSED_ENTITY_IDS))
     await timer_manager.start()
     if DEBUG_LOGGING:
         asyncio.create_task(event_loop_lag_monitor())

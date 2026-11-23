@@ -123,11 +123,14 @@ def _rms(pcm: bytes) -> float:
 
 
 def save_input_audio(pcm_chunks: list, aux_chunks: list | None = None,
-                     vnr: list | None = None) -> None:
+                     vnr: list | None = None, device: str = "", summary: str = "") -> None:
     """Debug: dump the buffered post-wake-word mic audio to a 16kHz mono WAV.
 
     Used to catch what triggers the wake word (e.g. false activations from a
     TV/film). Keeps only the most recent INPUT_AUDIO_KEEP files.
+    The file name carries the speaker (last IP octet, e.g. _dev153) and
+    index.jsonl maps each file to the full IP and what was heard/done, so
+    recordings can be sorted by microphone (speaker-verification data).
     """
     if not pcm_chunks:
         return
@@ -138,7 +141,8 @@ def save_input_audio(pcm_chunks: list, aux_chunks: list | None = None,
         rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2))) if samples.size else 0.0
         os.makedirs(INPUT_AUDIO_DIR, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        name = f"in_{stamp}_peak{int(peak)}_rms{int(rms)}.wav"
+        dev = f"_dev{device.rsplit('.', 1)[-1]}" if device and device != "?" else ""
+        name = f"in_{stamp}{dev}_peak{int(peak)}_rms{int(rms)}.wav"
         path = os.path.join(INPUT_AUDIO_DIR, name)
         with wave.open(path, "wb") as w:
             w.setnchannels(1)
@@ -146,6 +150,9 @@ def save_input_audio(pcm_chunks: list, aux_chunks: list | None = None,
             w.setframerate(INPUT_AUDIO_SAMPLE_RATE)
             w.writeframes(raw)
         print(f"  [stream] Saved input audio -> {path}", flush=True)
+        with open(os.path.join(INPUT_AUDIO_DIR, "index.jsonl"), "a") as f:
+            f.write(json.dumps({"file": name, "device": device, "summary": summary},
+                               ensure_ascii=False) + "\n")
         # Channel 1 and the VNR trace go to a side folder under the same name, so
         # they line up with the main clip without counting towards its ring cleanup.
         if aux_chunks or vnr:
@@ -887,7 +894,8 @@ async def handle_esp32_connection(websocket, entity_list, room_lights, local_are
                     flush=True,
                 )
             if SAVE_INPUT_AUDIO:
-                save_input_audio(buffered_pcm_chunks, aux_pcm_chunks, vnr_trace)
+                save_input_audio(buffered_pcm_chunks, aux_pcm_chunks, vnr_trace,
+                                 device=speaker, summary=summary or "")
 
             # Signal end of audio stream
             if response_audio_bytes > 0:

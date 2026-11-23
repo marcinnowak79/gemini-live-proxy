@@ -2,6 +2,13 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.11.3
+
+- Saved input recordings (`SAVE_INPUT_AUDIO`) now name the speaker they came
+  from (`in_<time>_dev<last IP octet>_…wav`), and `index.jsonl` in the same
+  folder maps each file to the speaker IP and what was heard/done. Groundwork
+  for telling household members apart by voice.
+
 ## 1.11.2
 
 - Fix: in the Pipeline mode the model wrote clock times in words itself
