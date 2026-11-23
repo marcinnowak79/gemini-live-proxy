@@ -95,6 +95,13 @@ def warm_up_in_background() -> None:
     def run():
         global _session
         try:
+            # The proxy runs at nice -10 for the audio path. onnxruntime's worker
+            # threads inherit this thread's priority when the session is created, so
+            # drop it here: voice scoring must never push audio or HA aside.
+            try:
+                os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
+            except (AttributeError, OSError) as err:
+                print(f"[voice] could not lower priority: {err}", flush=True)
             _load()
             x = (np.random.default_rng(0).standard_normal((1, 48000)) * 0.03).astype(np.float32)
             timings = {}

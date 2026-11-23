@@ -2,6 +2,12 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.11.9
+
+- Speaker verification runs at low CPU priority (nice 10) instead of
+  inheriting the proxy's -10, so it never competes with the audio path.
+- "A jak ja mam na imię?" / "Kim ja jestem?" also reach the voice gate.
+
 ## 1.11.8
 
 - Speaker verification start-up benchmark: times 2 and 4 threads (and an

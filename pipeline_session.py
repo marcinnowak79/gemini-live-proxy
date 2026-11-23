@@ -61,7 +61,7 @@ VERIFY_TOKEN = _cfg("SPEAKER_VERIFY_TOKEN", "")
 VOICE_ON = speaker_verify.available() or bool(VERIFY_URL)
 speaker_verify.warm_up_in_background()
 LEARN_LOG = _cfg("SPEAKER_LEARN_LOG", "/share/asystent_nauka.jsonl")
-_WHOAMI_RE = re.compile(r"^(kim jestem|kto (to )?(do ciebie )?mówi|sprawdź (mój )?głos|(czy )?(mnie )?rozpoznajesz( mnie)?|jak mam na imię|jak się nazywam|wiesz kim jestem|kto ja jestem)")
+_WHOAMI_RE = re.compile(r"^(?:a )?(?:jak ja mam na imię|kim ja jestem|kim jestem|kto (to )?(do ciebie )?mówi|sprawdź (mój )?głos|(czy )?(mnie )?rozpoznajesz( mnie)?|jak mam na imię|jak się nazywam|wiesz kim jestem|kto ja jestem)")
 _LEARN_RE = re.compile(r"^naucz się (?P<what>.+)")
 # Band handed to the recogniser, "<low>-<high>" Hz, or "off". The Voice PE
 # carries a steady tone near 7.8 kHz in both XMOS channels (on every recording
