@@ -2,6 +2,19 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.11.2
+
+- Fix: in the Pipeline mode the model wrote clock times in words itself
+  ("dwudziesta dwudziesta ósma" for 20:28), so `speak_times_pl` had nothing
+  to convert. The Pipeline prompt now asks for digits (`20:28`) and drops the
+  Live-only "how to say the time" hint; the program turns digits into words.
+  As a safety net, ordinal minutes after an hour are rewritten as cardinals
+  ("dwudziesta dwudziesta ósma" → "dwudziesta dwadzieścia osiem").
+- All providers: a new "no substitutes" rule. When nothing on the list does
+  exactly what was asked (e.g. an app without a script, such as Apple TV), the
+  assistant says it can't do it yet instead of running something similar
+  (e.g. Netflix).
+
 ## 1.11.1
 
 - Fix: spoken answers in the Pipeline mode were silent. `google-genai` 3.x

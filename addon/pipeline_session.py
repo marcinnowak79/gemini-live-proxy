@@ -85,7 +85,8 @@ PIPELINE_PROMPT = """
 Dostajesz tekst rozpoznany z mowy użytkownika; może zawierać drobne błędy rozpoznawania —
 zinterpretuj go jako najbardziej prawdopodobne polecenie po polsku. Twoja odpowiedź tekstowa
 zostanie przeczytana na głos, więc pisz krótko, naturalnie, bez list i formatowania,
-liczby słownie gdy to naturalne.
+liczby słownie gdy to naturalne. WYJĄTEK: godzinę zawsze pisz cyframi w formacie GG:MM
+(np. „Jest 20:28.”, „o 7:05”) — system sam przeczyta ją poprawnie; nie zapisuj godziny słowami.
 Przy sterowaniu urządzeniami, scenami, skryptami i klimatyzacją wywołaj narzędzie i wypełnij jego
 pole "say" bardzo krótkim potwierdzeniem (np. „Gaszę lampkę na biurku.”).
 Przy pytaniach (stan urządzeń, wyszukiwanie, minutniki, parking) najpierw wywołaj narzędzie,
@@ -406,7 +407,10 @@ class PipelineSession:
                     SAY_FIELD: {"type": "string", "description":
                                 "Bardzo krótkie potwierdzenie po polsku do powiedzenia na głos."},
                 }}
-        prompt = build_prompt(self.entity_list, self.ha_context, self.history,
+        # Podpowiedź „godzinę mów tak: …” jest dla dostawców Live; tu godzina idzie cyframi
+        # i zamienia ją na słowa speak_times_pl przed TTS.
+        ha_context = re.sub(r" \(godzinę mów tak:.*?\)(?=\n|$)", "", self.ha_context)
+        prompt = build_prompt(self.entity_list, ha_context, self.history,
                               self.local_area_id) + (PIPELINE_PROMPT_OK if OK_CONFIRMATION
                                                      else PIPELINE_PROMPT)
         thinking = (types.ThinkingConfig(thinking_budget=0) if LLM_MODEL.startswith("gemini-2.5")

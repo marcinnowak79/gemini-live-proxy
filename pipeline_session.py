@@ -11,6 +11,7 @@ The trade-off is that a vocabulary-primed recogniser "hears" device names in
 pure noise, so clips with almost no detected speech are dropped before they
 reach it (see speech_vad).
 """
+import array
 import asyncio
 import io
 import json
@@ -21,6 +22,7 @@ import wave
 from typing import AsyncGenerator, Awaitable, Callable
 
 import aiohttp
+import numpy as np
 from google import genai
 from google.genai import types
 
@@ -31,6 +33,7 @@ from ai_common import (
     build_prompt,
     build_tool_specs,
     debug_log,
+    speak_times_pl,
     web_search,
 )
 
@@ -45,8 +48,24 @@ OPENAI_API_KEY = _cfg("OPENAI_API_KEY", "")
 STT_MODEL = _cfg("PIPELINE_STT_MODEL", "gpt-4o-transcribe")
 LLM_MODEL = _cfg("PIPELINE_LLM_MODEL", "gemini-3.1-flash-lite")
 TTS_MODEL = _cfg("PIPELINE_TTS_MODEL", "gemini-3.8-flash-lite-tts")
+# Used for one sentence when TTS_MODEL fails before any audio; "off" disables.
+TTS_FALLBACK_MODEL = _cfg("PIPELINE_TTS_FALLBACK_MODEL", "gemini-3.8-flash-tts")
+if TTS_FALLBACK_MODEL.lower() == "off":
+    TTS_FALLBACK_MODEL = ""
 TTS_VOICE = _cfg("PIPELINE_TTS_VOICE", _cfg("GEMINI_VOICE", "Charon"))
 MIN_SPEECH_MS = int(_cfg("PIPELINE_MIN_SPEECH_MS", "300"))
+# Band handed to the recogniser, "<low>-<high>" Hz, or "off". The Voice PE
+# carries a steady tone near 7.8 kHz in both XMOS channels (on every recording
+# since at least 2026-10-25; room-independent), and the Echo Dot a rumble under
+# 100 Hz. Cutting both changed the transcripts of the 2026-11-02 recordings:
+# Voice PE "przed pochodnią" 4/4 -> "przed pokojem" 2/4, and a garbled
+# "Czy światło przekopałeś?" -> "Zgaś światło w przedpokoju".
+STT_BAND = _cfg("PIPELINE_STT_BAND", "100-6500").lower()
+# A plain action that succeeded is confirmed with one stock "OK" instead of a
+# sentence written by the model and synthesised per command.
+OK_CONFIRMATION = _cfg("PIPELINE_OK_CONFIRMATION", "true").lower() == "true"
+OK_TEXT = "OK."
+OK_CACHE_DIR = _cfg("PIPELINE_OK_CACHE_DIR", "/data")
 MAX_TOOL_ROUNDS = 3
 SAY_FIELD = "say"
 
@@ -66,7 +85,8 @@ PIPELINE_PROMPT = """
 Dostajesz tekst rozpoznany z mowy użytkownika; może zawierać drobne błędy rozpoznawania —
 zinterpretuj go jako najbardziej prawdopodobne polecenie po polsku. Twoja odpowiedź tekstowa
 zostanie przeczytana na głos, więc pisz krótko, naturalnie, bez list i formatowania,
-liczby słownie gdy to naturalne.
+liczby słownie gdy to naturalne. WYJĄTEK: godzinę zawsze pisz cyframi w formacie GG:MM
+(np. „Jest 20:28.”, „o 7:05”) — system sam przeczyta ją poprawnie; nie zapisuj godziny słowami.
 Przy sterowaniu urządzeniami, scenami, skryptami i klimatyzacją wywołaj narzędzie i wypełnij jego
 pole "say" bardzo krótkim potwierdzeniem (np. „Gaszę lampkę na biurku.”).
 Przy pytaniach (stan urządzeń, wyszukiwanie, minutniki, parking) najpierw wywołaj narzędzie,
@@ -75,6 +95,104 @@ Jeśli tekst nie jest poleceniem ani pytaniem do Ciebie (urywek rozmowy, szum), 
 żadnego narzędzia i nie odpowiadaj nic.
 === KONIEC TRYBU TEKSTOWEGO ===
 """
+
+
+_ok_pcm: bytes | None = None
+_ok_lock = asyncio.Lock()
+
+
+async def _ok_clip(client: genai.Client) -> bytes | None:
+    """The "OK" confirmation in the assistant's voice, synthesised once and kept on disk."""
+    global _ok_pcm
+    if _ok_pcm:
+        return _ok_pcm
+    async with _ok_lock:
+        if _ok_pcm:
+            return _ok_pcm
+        path = os.path.join(OK_CACHE_DIR, f"ok_{TTS_MODEL}_{TTS_VOICE}.pcm")
+        try:
+            with open(path, "rb") as f:
+                _ok_pcm = f.read() or None
+        except OSError:
+            pass
+        if _ok_pcm:
+            return _ok_pcm
+        chunks: list[bytes] = []
+
+        async def collect(data: bytes):
+            chunks.append(data)
+
+        await _synthesise(client, OK_TEXT, collect)
+        if chunks:
+            _ok_pcm = _trim_silence(b"".join(chunks))
+            try:
+                with open(path, "wb") as f:
+                    f.write(_ok_pcm)
+                print(f"  [pipeline] OK confirmation saved to {path} ({len(_ok_pcm)}B)", flush=True)
+            except OSError as err:
+                print(f"  [pipeline] OK confirmation not saved: {err}", flush=True)
+        return _ok_pcm
+
+
+def _trim_silence(pcm: bytes, rate: int = 24000, keep_ms: int = 30) -> bytes:
+    """Cut the silence TTS puts around a word; a short clip should start at once."""
+    samples = array.array("h", pcm[: len(pcm) // 2 * 2])
+    frame = rate // 100
+    loud = [i for i in range(0, len(samples), frame)
+            if max((abs(x) for x in samples[i:i + frame]), default=0) > 500]
+    if not loud:
+        return pcm
+    keep = rate * keep_ms // 1000
+    start = max(0, loud[0] - keep)
+    end = min(len(samples), loud[-1] + frame + 3 * keep)
+    return samples[start:end].tobytes()
+
+
+async def _synthesise(client: genai.Client, text: str,
+                      on_audio_out: Callable[[bytes], Awaitable[None]]) -> None:
+    config = types.GenerateContentConfig(
+        response_modalities=["AUDIO"],
+        speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
+            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=TTS_VOICE))),
+    )
+    text = speak_times_pl(text)
+    t_tts = time.monotonic()
+    # Google's TTS now and then rejects a valid request (2026-11-12: 400
+    # "Unknown name speechConfig") or runs out of per-model quota (429). Such a
+    # failure is retried once on the fallback model, for this sentence only;
+    # the next answer starts again on TTS_MODEL. Once audio has gone out, a
+    # retry would repeat it, so a failure mid-stream is only logged.
+    models = [TTS_MODEL] + ([TTS_FALLBACK_MODEL]
+                            if TTS_FALLBACK_MODEL and TTS_FALLBACK_MODEL != TTS_MODEL else [])
+    for attempt, model in enumerate(models):
+        sent_audio = False
+        first = True
+        try:
+            stream = await client.aio.models.generate_content_stream(
+                model=model, contents=text, config=config)
+            async for chunk in stream:
+                if first:
+                    first = False
+                    debug_log(f"  [pipeline] tts first chunk {1000 * (time.monotonic() - t_tts):.0f}ms ({model})")
+                for cand in chunk.candidates or []:
+                    for part in (cand.content.parts if cand.content else None) or []:
+                        if part.inline_data and part.inline_data.data:
+                            sent_audio = True
+                            await on_audio_out(part.inline_data.data)
+            return
+        except Exception as err:  # noqa: BLE001 - the action already happened; just log
+            print(f"  [pipeline] TTS ERROR ({model}): {type(err).__name__}: {err}", flush=True)
+            if sent_audio or attempt + 1 >= len(models):
+                return
+            print(f"  [pipeline] TTS retry on fallback model {models[attempt + 1]}", flush=True)
+
+
+PIPELINE_PROMPT_OK = PIPELINE_PROMPT.replace(
+    """Przy sterowaniu urządzeniami, scenami, skryptami i klimatyzacją wywołaj narzędzie i wypełnij jego
+pole "say" bardzo krótkim potwierdzeniem (np. „Gaszę lampkę na biurku.”).""",
+    """Przy sterowaniu urządzeniami, scenami, skryptami i klimatyzacją tylko wywołaj narzędzie, bez
+tekstu — potwierdzenie „OK” odtworzy system. Jeśli wynik narzędzia pokaże błąd albo brak zmiany,
+powiedz o tym jednym krótkim zdaniem.""")
 
 
 def _vocabulary(entity_list: str) -> str:
@@ -104,6 +222,22 @@ def _fit_enums(args: dict, spec: dict | None) -> dict:
             print(f"  [pipeline] fixed {key}={value!r} -> {cleaned!r}", flush=True)
             fixed[key] = cleaned
     return fixed
+
+
+def _speech_band(pcm: bytes) -> bytes:
+    """Drop everything outside STT_BAND before transcription (whole clip, one FFT)."""
+    if STT_BAND in ("", "off", "none") or len(pcm) < 64:
+        return pcm
+    try:
+        low, high = (float(v) for v in STT_BAND.split("-"))
+    except ValueError:
+        return pcm
+    x = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16).astype(np.float64)
+    spectrum = np.fft.rfft(x)
+    freqs = np.fft.rfftfreq(x.size, 1 / DEVICE_SAMPLE_RATE)
+    spectrum[(freqs < low) | (freqs > high)] = 0
+    y = np.fft.irfft(spectrum, x.size)
+    return np.clip(np.round(y), -32768, 32767).astype(np.int16).tobytes()
 
 
 def _wav_bytes(pcm: bytes) -> bytes:
@@ -225,7 +359,11 @@ class PipelineSession:
         async def google():
             await self.client.aio.models.get(model=LLM_MODEL)
 
-        results = await asyncio.gather(openai(), google(), return_exceptions=True)
+        async def ok():
+            if OK_CONFIRMATION:
+                await _ok_clip(self.client)
+
+        results = await asyncio.gather(openai(), google(), ok(), return_exceptions=True)
         for err in results:
             if isinstance(err, Exception):
                 debug_log(f"  [pipeline] warm-up failed: {type(err).__name__}: {err}")
@@ -238,7 +376,7 @@ class PipelineSession:
                   "zgaś, klimatyzacja, nawiew, minutnik, parking. Urządzenia: "
                   + _vocabulary(self.entity_list))
         form = aiohttp.FormData()
-        form.add_field("file", _wav_bytes(pcm), filename="in.wav", content_type="audio/wav")
+        form.add_field("file", _wav_bytes(_speech_band(pcm)), filename="in.wav", content_type="audio/wav")
         form.add_field("model", STT_MODEL)
         form.add_field("language", "pl")
         form.add_field("prompt", prompt)
@@ -261,7 +399,7 @@ class PipelineSession:
         specs = build_tool_specs(list(self.room_lights.keys()), self.vacuum_enabled)
         self._specs = {spec["name"]: spec for spec in specs}
         for spec in specs:
-            if spec["name"] not in QUERY_TOOLS:
+            if spec["name"] not in QUERY_TOOLS and not OK_CONFIRMATION:
                 # Text written alongside a function call is often left out; a field of
                 # the call itself is not, so the confirmation needs no second round trip.
                 spec["parameters"] = {**spec["parameters"], "properties": {
@@ -269,8 +407,12 @@ class PipelineSession:
                     SAY_FIELD: {"type": "string", "description":
                                 "Bardzo krótkie potwierdzenie po polsku do powiedzenia na głos."},
                 }}
-        prompt = build_prompt(self.entity_list, self.ha_context, self.history,
-                              self.local_area_id) + PIPELINE_PROMPT
+        # Podpowiedź „godzinę mów tak: …” jest dla dostawców Live; tu godzina idzie cyframi
+        # i zamienia ją na słowa speak_times_pl przed TTS.
+        ha_context = re.sub(r" \(godzinę mów tak:.*?\)(?=\n|$)", "", self.ha_context)
+        prompt = build_prompt(self.entity_list, ha_context, self.history,
+                              self.local_area_id) + (PIPELINE_PROMPT_OK if OK_CONFIRMATION
+                                                     else PIPELINE_PROMPT)
         thinking = (types.ThinkingConfig(thinking_budget=0) if LLM_MODEL.startswith("gemini-2.5")
                     else types.ThinkingConfig(thinking_level="minimal"))
         return types.GenerateContentConfig(
@@ -321,6 +463,26 @@ class PipelineSession:
                                   self._specs.get(fc.name))
                 debug_log(f"  [pipeline] FC: {fc.name}({args})")
                 made.append(f"{fc.name}({args})")
+            plain = all(fc.name not in QUERY_TOOLS for fc in calls)
+            if plain and OK_CONFIRMATION:
+                results = await asyncio.gather(*(self._call_tool(fc) for fc in calls))
+                if all(isinstance(r, dict) and r.get("status") == "ok" and not r.get("no_change")
+                       for r in results):
+                    clip = await _ok_clip(self.client)
+                    if clip:
+                        await on_audio_out(clip)
+                    else:
+                        await self._speak(OK_TEXT, on_audio_out)
+                    return OK_TEXT, made
+                # Failed or nothing changed: let the model say so in its own words.
+                contents.append(resp.candidates[0].content)
+                contents.append(types.Content(role="user", parts=[
+                    types.Part(function_response=types.FunctionResponse(
+                        id=fc.id, name=fc.name, response=r if isinstance(r, dict) else {"result": r}))
+                    for fc, r in zip(calls, results)
+                ]))
+                continue
+
             if not said:
                 said = " ".join(str(fc.args[SAY_FIELD]).strip() for fc in calls
                                 if fc.args and fc.args.get(SAY_FIELD)).strip()
@@ -328,7 +490,6 @@ class PipelineSession:
             # A plain action comes with its confirmation already written. Synthesise it
             # while Home Assistant carries the action out, but hold the audio back
             # until the action is confirmed: never announce something that failed.
-            plain = all(fc.name not in QUERY_TOOLS for fc in calls)
             held = _HeldSpeech(self, said) if plain and said else None
             results = await asyncio.gather(*(self._call_tool(fc) for fc in calls))
             ok = all(isinstance(r, dict) and r.get("status") == "ok" and not r.get("no_change")
@@ -348,23 +509,4 @@ class PipelineSession:
         return "", made
 
     async def _speak(self, text: str, on_audio_out: Callable[[bytes], Awaitable[None]]) -> None:
-        config = types.GenerateContentConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=TTS_VOICE))),
-        )
-        t_tts = time.monotonic()
-        first = True
-        try:
-            stream = await self.client.aio.models.generate_content_stream(
-                model=TTS_MODEL, contents=text, config=config)
-            async for chunk in stream:
-                if first:
-                    first = False
-                    debug_log(f"  [pipeline] tts first chunk {1000 * (time.monotonic() - t_tts):.0f}ms")
-                for cand in chunk.candidates or []:
-                    for part in (cand.content.parts if cand.content else None) or []:
-                        if part.inline_data and part.inline_data.data:
-                            await on_audio_out(part.inline_data.data)
-        except Exception as err:  # noqa: BLE001 - the action already happened; just log
-            print(f"  [pipeline] TTS ERROR: {type(err).__name__}: {err}", flush=True)
+        await _synthesise(self.client, text, on_audio_out)

@@ -76,6 +76,17 @@ If the user says a follow-up command without naming a room or device, prefer the
 === END FOLLOW-UP TARGET RESOLUTION ===
 """
 
+NO_SUBSTITUTE_PROMPT = """
+=== NIE ZGADUJ ZAMIENNIKÓW (WAŻNE) ===
+Jeśli użytkownik prosi o coś, czego żadne urządzenie, skrypt, scena ani narzędzie z listy nie
+robi dokładnie (np. włączenie aplikacji, dla której nie ma skryptu: Apple TV, HBO, Disney+),
+NIE uruchamiaj podobnego zamiennika (np. Netflixa zamiast Apple TV). Nie wywołuj wtedy żadnego
+narzędzia i powiedz krótko, że tego jeszcze nie umiesz, np. „Nie umiem jeszcze włączyć Apple TV.”.
+Tak samo gdy nie wiesz, jak coś zrobić: powiedz to, zamiast robić cokolwiek na siłę.
+Wyjątek: oczywiste przekręcenie nazwy, która jest na liście (np. „Netlix” → Netflix).
+=== KONIEC ===
+"""
+
 INPUT_LANGUAGE_LOCK_PROMPT = """
 === INPUT LANGUAGE (CRITICAL) ===
 The user ALWAYS speaks Polish (pl-PL). Interpret every spoken input as Polish.
@@ -165,6 +176,7 @@ def build_prompt(entity_list: str, ha_context: str, history: list,
     )
     prompt += build_persona_prompt()
     prompt += INPUT_LANGUAGE_LOCK_PROMPT
+    prompt += NO_SUBSTITUTE_PROMPT
     if history:
         prompt += "\n=== OSTATNIA ROZMOWA ===\n"
         for h in history:
@@ -495,6 +507,29 @@ _TIME_RE = re.compile(r"(?:(?<=\s)|^)(?:(?P<prep>[A-Za-zżźćńółęąśŻŹĆ
                       r"(?P<h>[01]?\d|2[0-3]):(?P<m>[0-5]\d)(?!\d)")
 
 
+_PL_ORD_TENS = {"dwudziesta": 20, "trzydziesta": 30, "czterdziesta": 40, "pięćdziesiąta": 50}
+_PL_ORD_VAL = {w: i for i, w in enumerate(_PL_ORD_UNITS) if w}
+_ORD_UNIT_ALT = "|".join(_PL_ORD_UNITS[1:10])
+_ORD_TEEN_ALT = "|".join(_PL_ORD_UNITS[10:20])
+_HOUR_ALT = "|".join([f"dwudziesta (?:{'|'.join(_PL_ORD_UNITS[1:4])})"] + sorted(
+    _PL_ORD_UNITS[1:21], key=len, reverse=True))
+# Godzina porządkowa + minuty BŁĘDNIE porządkowe (model pisze sam słowami, np. 20:28 jako
+# „dwudziesta dwudziesta ósma”). Minuty liczebnikiem głównym: „dwudziesta dwadzieścia osiem”.
+_BAD_SPOKEN_TIME_RE = re.compile(
+    rf"\b(?P<h>{_HOUR_ALT})\s+(?P<m>(?:(?:{'|'.join(_PL_ORD_TENS)})(?:\s+(?:{_ORD_UNIT_ALT}))?)"
+    rf"|(?:{_ORD_TEEN_ALT}))\b", re.IGNORECASE)
+
+
+def _fix_ordinal_minutes(text: str) -> str:
+    def repl(mt: "re.Match") -> str:
+        words = mt.group("m").lower().split()
+        minute = _PL_ORD_TENS.get(words[0]) or _PL_ORD_VAL[words[0]]
+        if len(words) > 1:
+            minute += _PL_ORD_VAL[words[1]]
+        return f"{mt.group('h')} {_pl_minutes(minute)}"
+    return _BAD_SPOKEN_TIME_RE.sub(repl, text)
+
+
 def speak_times_pl(text: str) -> str:
     """Zamień godziny HH:MM w tekście do TTS na słowa z odmianą po przyimku."""
     def repl(mt: "re.Match") -> str:
@@ -502,4 +537,4 @@ def speak_times_pl(text: str) -> str:
         case = _PL_PREP_CASE.get(prep.lower(), "nom") if prep else "nom"
         words = spoken_time_pl(int(mt.group("h")), int(mt.group("m")), case)
         return f"{prep} {words}" if prep else words
-    return _TIME_RE.sub(repl, text)
+    return _fix_ordinal_minutes(_TIME_RE.sub(repl, text))
