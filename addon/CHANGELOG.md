@@ -2,6 +2,12 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.11.6
+
+- An ordinary command never waits for speaker verification: if the verifier
+  has not answered within 0.2 s after speech recognition, the command goes on
+  without knowing the speaker. Only "kim jestem" / "naucz się …" wait.
+
 ## 1.11.5
 
 - Speaker verification now runs on every Pipeline command, alongside speech

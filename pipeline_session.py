@@ -332,7 +332,17 @@ class PipelineSession:
         verify_task = asyncio.create_task(self._verify(pcm)) if VERIFY_URL else None
         text = await self._transcribe(pcm)
         t_stt = time.monotonic()
-        self.voice = await verify_task if verify_task else None
+        if verify_task:
+            # Normally done long before STT. If the verifier hangs (e.g. its host is
+            # asleep), an ordinary command must not wait for it: give it 0.2 s more,
+            # then go on without knowing the speaker. Gated commands wait it out.
+            norm = re.sub(r"[^\w\s]", "", (text or "").lower()).strip()
+            gated = bool(_WHOAMI_RE.match(norm) or _LEARN_RE.match(norm))
+            try:
+                self.voice = await asyncio.wait_for(asyncio.shield(verify_task),
+                                                    None if gated else 0.2)
+            except asyncio.TimeoutError:
+                print("  [auth] voice: not ready after STT, skipped for this command", flush=True)
         print(f"  [pipeline] HEARD (user): {text!r}", flush=True)
         if not text:
             return ""
