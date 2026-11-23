@@ -2,6 +2,11 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.11.8
+
+- Speaker verification start-up benchmark: times 2 and 4 threads (and an
+  optional `ecapa_int8.onnx`) on this machine and keeps the fastest.
+
 ## 1.11.7
 
 - Speaker verification can run inside the add-on (`speaker_verification`

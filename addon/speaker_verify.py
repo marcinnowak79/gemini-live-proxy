@@ -24,7 +24,7 @@ DIR = os.getenv("SPEAKER_ID_DIR", "/share/speaker_id")
 OWNER = os.getenv("SPEAKER_OWNER", "Marcin")
 OK = float(os.getenv("SPEAKER_OK_SCORE", "0.42"))
 UNSURE = float(os.getenv("SPEAKER_UNSURE_SCORE", "0.30"))
-THREADS = int(os.getenv("SPEAKER_THREADS", "2"))
+THREADS = int(os.getenv("SPEAKER_THREADS", "0"))  # 0 = pick the faster of 2/4 at start-up
 MAX_SECONDS = 8
 
 _lock = threading.Lock()
@@ -37,19 +37,23 @@ def available() -> bool:
         and os.path.exists(os.path.join(DIR, "voices.json"))
 
 
+def _new_session(threads: int, model: str = "ecapa.onnx"):
+    import onnxruntime as ort
+
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = threads
+    opts.inter_op_num_threads = 1
+    return ort.InferenceSession(os.path.join(DIR, model), sess_options=opts,
+                                providers=["CPUExecutionProvider"])
+
+
 def _load() -> None:
     global _session, _voices
     with _lock:
         if _session is not None:
             return
-        import onnxruntime as ort
-
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = THREADS
-        opts.inter_op_num_threads = 1
         t0 = time.monotonic()
-        _session = ort.InferenceSession(os.path.join(DIR, "ecapa.onnx"), sess_options=opts,
-                                        providers=["CPUExecutionProvider"])
+        _session = _new_session(THREADS or 2)
         with open(os.path.join(DIR, "voices.json")) as f:
             raw = json.load(f)["voices"]
         _voices = {name: np.asarray(p, dtype=np.float32) for name, p in raw.items()}
@@ -89,12 +93,29 @@ def warm_up_in_background() -> None:
         return
 
     def run():
+        global _session
         try:
-            noise = (np.random.default_rng(0).standard_normal(48000) * 1000).astype(np.int16)
-            verify(noise.tobytes())
-            r = verify(noise.tobytes())
-            print(f"[voice] warm-up: 3 s of audio scored in {r['ms']} ms "
-                  f"({THREADS} threads)", flush=True)
+            _load()
+            x = (np.random.default_rng(0).standard_normal((1, 48000)) * 0.03).astype(np.float32)
+            timings = {}
+            # An optional int8 copy (ecapa_int8.onnx) is timed too; on a Pi 4 it was not faster.
+            models = ["ecapa.onnx"] + (["ecapa_int8.onnx"]
+                                       if os.path.exists(os.path.join(DIR, "ecapa_int8.onnx")) else [])
+            combos = [(m, t) for m in models for t in ([THREADS] if THREADS else [2, 4])]
+            for model, threads in combos:
+                s = _new_session(threads, model)
+                s.run(None, {"wav": x})
+                best = float("inf")
+                for _ in range(3):
+                    t0 = time.monotonic()
+                    s.run(None, {"wav": x})
+                    best = min(best, time.monotonic() - t0)
+                timings[f"{model[:-5]}/{threads}t"] = (round(1000 * best), s)
+            pick = min(timings, key=lambda k: timings[k][0])
+            _session = timings[pick][1]
+            print(f"[voice] warm-up, 3 s of audio: "
+                  f"{', '.join(f'{k} {v[0]} ms' for k, v in timings.items())} "
+                  f"-> using {pick}", flush=True)
         except Exception as err:  # noqa: BLE001
             print(f"[voice] warm-up ERROR: {type(err).__name__}: {err}", flush=True)
 
