@@ -2,6 +2,14 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.11.5
+
+- Speaker verification now runs on every Pipeline command, alongside speech
+  recognition (no added latency). The model gets one line saying who is
+  speaking and is told not to take the speaker's name from the conversation
+  history: someone else may have spoken before. "Jak mam na imię" and similar
+  questions are answered by the gate directly.
+
 ## 1.11.4
 
 - Experimental speaker verification gate (Pipeline mode). With the new

@@ -58,7 +58,7 @@ MIN_SPEECH_MS = int(_cfg("PIPELINE_MIN_SPEECH_MS", "300"))
 VERIFY_URL = _cfg("SPEAKER_VERIFY_URL", "").rstrip("/")
 VERIFY_TOKEN = _cfg("SPEAKER_VERIFY_TOKEN", "")
 LEARN_LOG = _cfg("SPEAKER_LEARN_LOG", "/share/asystent_nauka.jsonl")
-_WHOAMI_RE = re.compile(r"^(kim jestem|kto (do ciebie )?mówi|sprawdź (mój )?głos|rozpoznajesz mnie|czy mnie rozpoznajesz)")
+_WHOAMI_RE = re.compile(r"^(kim jestem|kto (to )?(do ciebie )?mówi|sprawdź (mój )?głos|(czy )?(mnie )?rozpoznajesz( mnie)?|jak mam na imię|jak się nazywam|wiesz kim jestem|kto ja jestem)")
 _LEARN_RE = re.compile(r"^naucz się (?P<what>.+)")
 # Band handed to the recogniser, "<low>-<high>" Hz, or "off". The Voice PE
 # carries a steady tone near 7.8 kHz in both XMOS channels (on every recording
@@ -301,6 +301,7 @@ class PipelineSession:
         self.vacuum_enabled = vacuum_enabled
         self.local_area_id = local_area_id
         self.stream_stats = stream_stats
+        self.voice: dict | None = None
 
     async def stream_audio(
         self,
@@ -328,13 +329,15 @@ class PipelineSession:
             print(f"  [pipeline] only {speech} ms of speech, not a command — skipped", flush=True)
             return ""
 
+        verify_task = asyncio.create_task(self._verify(pcm)) if VERIFY_URL else None
         text = await self._transcribe(pcm)
         t_stt = time.monotonic()
+        self.voice = await verify_task if verify_task else None
         print(f"  [pipeline] HEARD (user): {text!r}", flush=True)
         if not text:
             return ""
 
-        gated = await self._auth_gate(text, pcm, on_audio_out)
+        gated = await self._auth_gate(text, on_audio_out)
         if gated is not None:
             return gated
 
@@ -356,7 +359,33 @@ class PipelineSession:
             summary = f"{summary} {answer}".strip()
         return f"(usłyszano: {text}) {summary}".strip() if summary else ""
 
-    async def _auth_gate(self, text: str, pcm: bytes,
+    async def _verify(self, pcm: bytes) -> dict:
+        """Who is speaking, by voice. Runs alongside STT, so it adds no latency."""
+        try:
+            async with _http_session().post(
+                    f"{VERIFY_URL}/verify", data=pcm, headers={"X-Token": VERIFY_TOKEN},
+                    timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                resp.raise_for_status()
+                res = await resp.json()
+        except Exception as err:  # noqa: BLE001
+            print(f"  [auth] verify ERROR: {type(err).__name__}: {err}", flush=True)
+            res = {"decision": "error"}
+        print(f"  [auth] voice: {res}", flush=True)
+        return res
+
+    def _speaker_note(self) -> str:
+        """One prompt line telling the model who is speaking (or that it is unknown)."""
+        if not self.voice:
+            return ""
+        d = self.voice.get("decision")
+        who = {"ok": "Marcin", "unsure": "prawdopodobnie Marcin (niepewne)"}.get(d) or (
+            "nieznany — rozpoznanie głosu nie działa" if d == "error" else
+            "Ania" if self.voice.get("ania", 0) >= 0.4 else "nierozpoznana osoba (NIE Marcin)")
+        return (f"\nMÓWCA (rozpoznany po głosie w TYM poleceniu): {who}. Imię mówiącego znasz "
+                "tylko z tej linii — nie bierz go z historii rozmowy, bo wcześniej mógł mówić ktoś inny. "
+                "Gdy mówca jest nierozpoznany, a pyta o swoje imię, powiedz, że nie rozpoznajesz jego głosu.\n")
+
+    async def _auth_gate(self, text: str,
                          on_audio_out: Callable[[bytes], Awaitable[None]]) -> str | None:
         """Voice check for 'kim jestem' / 'naucz się …', answered without the model.
 
@@ -370,15 +399,7 @@ class PipelineSession:
         whoami, learn = _WHOAMI_RE.match(norm), _LEARN_RE.match(norm)
         if not (whoami or learn):
             return None
-        try:
-            async with _http_session().post(
-                    f"{VERIFY_URL}/verify", data=pcm, headers={"X-Token": VERIFY_TOKEN},
-                    timeout=aiohttp.ClientTimeout(total=4)) as resp:
-                resp.raise_for_status()
-                res = await resp.json()
-        except Exception as err:  # noqa: BLE001
-            print(f"  [auth] verify ERROR: {type(err).__name__}: {err}", flush=True)
-            res = {"decision": "error"}
+        res = self.voice or {"decision": "error"}
         d = res.get("decision")
         print(f"  [auth] {'learn' if learn else 'whoami'}: {res}", flush=True)
         if d == "error":
@@ -467,6 +488,7 @@ class PipelineSession:
         # Podpowiedź „godzinę mów tak: …” jest dla dostawców Live; tu godzina idzie cyframi
         # i zamienia ją na słowa speak_times_pl przed TTS.
         ha_context = re.sub(r" \(godzinę mów tak:.*?\)(?=\n|$)", "", self.ha_context)
+        ha_context += self._speaker_note()
         prompt = build_prompt(self.entity_list, ha_context, self.history,
                               self.local_area_id) + (PIPELINE_PROMPT_OK if OK_CONFIRMATION
                                                      else PIPELINE_PROMPT)
