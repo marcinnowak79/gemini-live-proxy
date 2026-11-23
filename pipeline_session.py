@@ -54,6 +54,12 @@ if TTS_FALLBACK_MODEL.lower() == "off":
     TTS_FALLBACK_MODEL = ""
 TTS_VOICE = _cfg("PIPELINE_TTS_VOICE", _cfg("GEMINI_VOICE", "Charon"))
 MIN_SPEECH_MS = int(_cfg("PIPELINE_MIN_SPEECH_MS", "300"))
+# Experimental speaker verification gate (see _auth_gate).
+VERIFY_URL = _cfg("SPEAKER_VERIFY_URL", "").rstrip("/")
+VERIFY_TOKEN = _cfg("SPEAKER_VERIFY_TOKEN", "")
+LEARN_LOG = _cfg("SPEAKER_LEARN_LOG", "/share/asystent_nauka.jsonl")
+_WHOAMI_RE = re.compile(r"^(kim jestem|kto (do ciebie )?mówi|sprawdź (mój )?głos|rozpoznajesz mnie|czy mnie rozpoznajesz)")
+_LEARN_RE = re.compile(r"^naucz się (?P<what>.+)")
 # Band handed to the recogniser, "<low>-<high>" Hz, or "off". The Voice PE
 # carries a steady tone near 7.8 kHz in both XMOS channels (on every recording
 # since at least 2026-10-25; room-independent), and the Echo Dot a rumble under
@@ -328,6 +334,10 @@ class PipelineSession:
         if not text:
             return ""
 
+        gated = await self._auth_gate(text, pcm, on_audio_out)
+        if gated is not None:
+            return gated
+
         first_audio: list[float] = []
 
         async def timed_audio_out(data: bytes):
@@ -345,6 +355,53 @@ class PipelineSession:
         if answer:
             summary = f"{summary} {answer}".strip()
         return f"(usłyszano: {text}) {summary}".strip() if summary else ""
+
+    async def _auth_gate(self, text: str, pcm: bytes,
+                         on_audio_out: Callable[[bytes], Awaitable[None]]) -> str | None:
+        """Voice check for 'kim jestem' / 'naucz się …', answered without the model.
+
+        Deterministic on purpose: the decision must not depend on what the model
+        makes of the request. Returns the history summary, or None when the
+        utterance is not a gated command (or the gate is off).
+        """
+        if not VERIFY_URL:
+            return None
+        norm = re.sub(r"[^\w\s]", "", text.lower()).strip()
+        whoami, learn = _WHOAMI_RE.match(norm), _LEARN_RE.match(norm)
+        if not (whoami or learn):
+            return None
+        try:
+            async with _http_session().post(
+                    f"{VERIFY_URL}/verify", data=pcm, headers={"X-Token": VERIFY_TOKEN},
+                    timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                resp.raise_for_status()
+                res = await resp.json()
+        except Exception as err:  # noqa: BLE001
+            print(f"  [auth] verify ERROR: {type(err).__name__}: {err}", flush=True)
+            res = {"decision": "error"}
+        d = res.get("decision")
+        print(f"  [auth] {'learn' if learn else 'whoami'}: {res}", flush=True)
+        if d == "error":
+            reply = "Nie mogę teraz sprawdzić głosu."
+        elif whoami:
+            reply = {"ok": "To ty, Marcin.",
+                     "unsure": "Chyba Marcin, ale nie jestem pewien."}.get(d) or (
+                "To chyba Ania." if res.get("ania", 0) >= 0.4 else "Nie rozpoznaję tego głosu.")
+        else:
+            what = text.split(" ", 2)[2].strip(" .!?") if len(text.split(" ", 2)) > 2 else ""
+            reply = {"ok": f"Rozpoznałem cię, Marcin. Zapisałem: {what}. Zabiorę się do tego.",
+                     "unsure": "Nie jestem pewien, że to ty. Powiedz to jeszcze raz, trochę dłużej."
+                     }.get(d, "Tego może mnie nauczyć tylko Marcin.")
+            try:
+                with open(LEARN_LOG, "a") as f:
+                    f.write(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "text": text,
+                                        "what": what, "accepted": d == "ok", **res},
+                                       ensure_ascii=False) + "\n")
+            except OSError as err:
+                print(f"  [auth] learn log ERROR: {err}", flush=True)
+        await self._speak(reply, on_audio_out)
+        print(f"  [pipeline] SAID (auth): {reply!r}", flush=True)
+        return f"(usłyszano: {text}) {reply}"
 
     async def _warm_up(self) -> None:
         """Cheap authenticated requests that leave HTTPS connections open for reuse."""

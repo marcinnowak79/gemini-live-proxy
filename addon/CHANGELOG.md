@@ -2,6 +2,15 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.11.4
+
+- Experimental speaker verification gate (Pipeline mode). With the new
+  `speaker_verify_url` option set, "kim jestem" and "naucz się …" send the
+  utterance audio to an external verification service before anything else
+  happens, and the answer is fixed text, not the model's. Accepted "naucz się"
+  requests are appended to `/share/asystent_nauka.jsonl` for a future agent.
+  Empty URL (the default) leaves everything as before.
+
 ## 1.11.3
 
 - Saved input recordings (`SAVE_INPUT_AUDIO`) now name the speaker they came
