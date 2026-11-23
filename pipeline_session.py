@@ -26,6 +26,7 @@ import numpy as np
 from google import genai
 from google.genai import types
 
+import speaker_verify
 import speech_vad
 from ai_common import (
     DEVICE_SAMPLE_RATE,
@@ -57,6 +58,8 @@ MIN_SPEECH_MS = int(_cfg("PIPELINE_MIN_SPEECH_MS", "300"))
 # Experimental speaker verification gate (see _auth_gate).
 VERIFY_URL = _cfg("SPEAKER_VERIFY_URL", "").rstrip("/")
 VERIFY_TOKEN = _cfg("SPEAKER_VERIFY_TOKEN", "")
+VOICE_ON = speaker_verify.available() or bool(VERIFY_URL)
+speaker_verify.warm_up_in_background()
 LEARN_LOG = _cfg("SPEAKER_LEARN_LOG", "/share/asystent_nauka.jsonl")
 _WHOAMI_RE = re.compile(r"^(kim jestem|kto (to )?(do ciebie )?mówi|sprawdź (mój )?głos|(czy )?(mnie )?rozpoznajesz( mnie)?|jak mam na imię|jak się nazywam|wiesz kim jestem|kto ja jestem)")
 _LEARN_RE = re.compile(r"^naucz się (?P<what>.+)")
@@ -329,7 +332,7 @@ class PipelineSession:
             print(f"  [pipeline] only {speech} ms of speech, not a command — skipped", flush=True)
             return ""
 
-        verify_task = asyncio.create_task(self._verify(pcm)) if VERIFY_URL else None
+        verify_task = asyncio.create_task(self._verify(pcm)) if VOICE_ON else None
         text = await self._transcribe(pcm)
         t_stt = time.monotonic()
         if verify_task:
@@ -372,6 +375,10 @@ class PipelineSession:
     async def _verify(self, pcm: bytes) -> dict:
         """Who is speaking, by voice. Runs alongside STT, so it adds no latency."""
         try:
+            if speaker_verify.available():
+                res = await asyncio.to_thread(speaker_verify.verify, pcm)
+                print(f"  [auth] voice: {res}", flush=True)
+                return res
             async with _http_session().post(
                     f"{VERIFY_URL}/verify", data=pcm, headers={"X-Token": VERIFY_TOKEN},
                     timeout=aiohttp.ClientTimeout(total=3)) as resp:
@@ -388,12 +395,21 @@ class PipelineSession:
         if not self.voice:
             return ""
         d = self.voice.get("decision")
-        who = {"ok": "Marcin", "unsure": "prawdopodobnie Marcin (niepewne)"}.get(d) or (
+        owner = speaker_verify.OWNER
+        other = self._other_speaker()
+        who = {"ok": owner, "unsure": f"prawdopodobnie {owner} (niepewne)"}.get(d) or (
             "nieznany — rozpoznanie głosu nie działa" if d == "error" else
-            "Ania" if self.voice.get("ania", 0) >= 0.4 else "nierozpoznana osoba (NIE Marcin)")
+            other or f"nierozpoznana osoba (NIE {owner})")
         return (f"\nMÓWCA (rozpoznany po głosie w TYM poleceniu): {who}. Imię mówiącego znasz "
                 "tylko z tej linii — nie bierz go z historii rozmowy, bo wcześniej mógł mówić ktoś inny. "
                 "Gdy mówca jest nierozpoznany, a pyta o swoje imię, powiedz, że nie rozpoznajesz jego głosu.\n")
+
+    def _other_speaker(self) -> str:
+        """Name of a recognised non-owner speaker, or ''. Works for both verifier variants."""
+        v = self.voice or {}
+        if "speaker" in v:
+            return v["speaker"] if v["speaker"] != speaker_verify.OWNER else ""
+        return "Ania" if v.get("ania", 0) >= 0.4 else ""
 
     async def _auth_gate(self, text: str,
                          on_audio_out: Callable[[bytes], Awaitable[None]]) -> str | None:
@@ -403,7 +419,7 @@ class PipelineSession:
         makes of the request. Returns the history summary, or None when the
         utterance is not a gated command (or the gate is off).
         """
-        if not VERIFY_URL:
+        if not VOICE_ON:
             return None
         norm = re.sub(r"[^\w\s]", "", text.lower()).strip()
         whoami, learn = _WHOAMI_RE.match(norm), _LEARN_RE.match(norm)
@@ -415,14 +431,15 @@ class PipelineSession:
         if d == "error":
             reply = "Nie mogę teraz sprawdzić głosu."
         elif whoami:
-            reply = {"ok": "To ty, Marcin.",
-                     "unsure": "Chyba Marcin, ale nie jestem pewien."}.get(d) or (
-                "To chyba Ania." if res.get("ania", 0) >= 0.4 else "Nie rozpoznaję tego głosu.")
+            owner, other = speaker_verify.OWNER, self._other_speaker()
+            reply = {"ok": f"To ty, {owner}.",
+                     "unsure": f"Chyba {owner}, ale nie jestem pewien."}.get(d) or (
+                f"To chyba {other}." if other else "Nie rozpoznaję tego głosu.")
         else:
             what = text.split(" ", 2)[2].strip(" .!?") if len(text.split(" ", 2)) > 2 else ""
-            reply = {"ok": f"Rozpoznałem cię, Marcin. Zapisałem: {what}. Zabiorę się do tego.",
+            reply = {"ok": f"Rozpoznałem cię, {speaker_verify.OWNER}. Zapisałem: {what}. Zabiorę się do tego.",
                      "unsure": "Nie jestem pewien, że to ty. Powiedz to jeszcze raz, trochę dłużej."
-                     }.get(d, "Tego może mnie nauczyć tylko Marcin.")
+                     }.get(d, f"Tego może mnie nauczyć tylko {speaker_verify.OWNER}.")
             try:
                 with open(LEARN_LOG, "a") as f:
                     f.write(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "text": text,

@@ -89,6 +89,9 @@ configuration:
   pipeline_ok_confirmation:
     name: Potwierdzanie akcji „OK” (pipeline)
     description: Udana prosta akcja jest potwierdzana nagranym „OK” głosem asystenta zamiast syntezowanego zdania. Pytania, błędy i „już jest wyłączone” nadal dostają odpowiedź głosem.
+  speaker_verification:
+    name: Rozpoznawanie mówcy na tym urządzeniu (eksperymentalne)
+    description: Tryb Pipeline: rozpoznaje, kto mówi, lokalnym modelem ECAPA. Wymaga ecapa.onnx i voices.json w /share/speaker_id (wzorce głosów zostają u Ciebie).
   speaker_verify_url:
     name: Adres weryfikacji głosu (eksperymentalne)
     description: "Tryb Pipeline: gdy ustawiony, „kim jestem” i „naucz się …” najpierw sprawdzają głos w tej usłudze (POST surowego PCM 16 kHz na <adres>/verify). Puste wyłącza."

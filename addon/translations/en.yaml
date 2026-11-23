@@ -98,6 +98,9 @@ configuration:
   pipeline_ok_confirmation:
     name: Confirm actions with "OK" (pipeline)
     description: A plain action that succeeded is confirmed with one prerecorded "OK" in the assistant's voice instead of a synthesised sentence. Questions, failures and "already off" still get a spoken answer.
+  speaker_verification:
+    name: Speaker verification on this device (experimental)
+    description: Pipeline mode: recognise who is speaking with a local ECAPA model. Needs ecapa.onnx and voices.json in /share/speaker_id (voice patterns stay on your machine).
   speaker_verify_url:
     name: Speaker verification URL (experimental)
     description: "Pipeline mode: when set, 'kim jestem' and 'naucz się …' first check the speaker's voice against this service (POST raw 16 kHz PCM to <url>/verify). Empty disables it."

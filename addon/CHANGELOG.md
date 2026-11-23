@@ -2,6 +2,15 @@
 
 All notable changes to this add-on are documented here.
 
+## 1.11.7
+
+- Speaker verification can run inside the add-on (`speaker_verification`
+  option): a local ECAPA model through onnxruntime, no external service. The
+  model and the voice patterns are read from `/share/speaker_id`
+  (`ecapa.onnx`, `voices.json`) and are not shipped with the add-on. A start-up
+  warm-up logs how long one 3 s clip takes on this machine. The external
+  `speaker_verify_url` service still works when the local files are absent.
+
 ## 1.11.6
 
 - An ordinary command never waits for speaker verification: if the verifier
